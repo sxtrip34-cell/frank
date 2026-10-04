@@ -4,10 +4,10 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::WebviewWindow;
 
-use ::windows::core::{BOOL, PCWSTR, PWSTR};
-use ::windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, POINT};
+use ::windows::core::{PCWSTR, PWSTR};
+use ::windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, HWND, LocalFree, POINT};
 use ::windows::Win32::Globalization::GetUserDefaultUILanguage;
 use ::windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use ::windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
@@ -15,18 +15,16 @@ use ::windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use ::windows::Win32::System::Ole::RevokeDragDrop;
 use ::windows::Win32::System::SystemInformation::GetLocalTime;
 use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_SWAPBUTTON,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 use super::LocalTime;
 use crate::i18n::Lang;
-use crate::island::WINDOW_LABEL;
 
 /// File name of the Claude Code relay.
 pub const HOOK_EXE: &str = "frank-hook.exe";
@@ -53,6 +51,13 @@ pub fn local_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("Frank")
+}
+
+/// C:\Frank (on the system drive) — the chat's own folder, where Frank keeps
+/// his memory. Out in the open on purpose: the user can read and edit it.
+pub fn frank_home() -> PathBuf {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    PathBuf::from(format!(r"{drive}\Frank"))
 }
 
 /// %APPDATA% and %LOCALAPPDATA% are already private to the user.
@@ -210,10 +215,86 @@ pub fn cursor_physical() -> Option<(f64, f64)> {
     Some((p.x as f64, p.y as f64))
 }
 
-/// True while the left mouse button is held — the only signal we get that a
-/// drag might be in flight before it reaches the window.
+/// True while the primary mouse button is held — the only signal we get that a
+/// drag might be in flight before it reaches the window. GetAsyncKeyState reads
+/// the physical button, so with the buttons swapped (left-handed) that is the
+/// right one.
 pub fn left_button_down() -> bool {
-    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+    let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+    let button = if swapped { VK_RBUTTON } else { VK_LBUTTON };
+    unsafe { (GetAsyncKeyState(button.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+/// True while Escape is held: it cancels a drag of the island.
+pub fn escape_down() -> bool {
+    unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+// ── Files for the chat ────────────────────────────────────────────────────────
+
+/// The files copied in Explorer (Ctrl+C), if that is what is on the clipboard.
+pub fn clipboard_files() -> Vec<PathBuf> {
+    use ::windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use ::windows::Win32::System::Ole::CF_HDROP;
+    use ::windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    let mut paths = Vec::new();
+    unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_err() || OpenClipboard(None).is_err() {
+            return paths;
+        }
+        if let Ok(handle) = GetClipboardData(CF_HDROP.0 as u32) {
+            let drop = HDROP(handle.0);
+            let count = DragQueryFileW(drop, u32::MAX, None);
+            for i in 0..count {
+                let len = DragQueryFileW(drop, i, None) as usize;
+                let mut buf = vec![0u16; len + 1];
+                let got = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+                paths.push(PathBuf::from(String::from_utf16_lossy(&buf[..got])));
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    paths
+}
+
+/// Windows' own Open dialog, for attaching a file to the chat. Blocks until it
+/// is closed, so it runs on a thread of its own; None when cancelled.
+pub fn pick_file(title: &str) -> Option<PathBuf> {
+    use ::windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use ::windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+    };
+
+    /// Balances CoInitializeEx however the dialog ends.
+    struct Com;
+    impl Drop for Com {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().ok()?;
+        let _com = Com;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog.SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM).ok()?;
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let _ = dialog.SetTitle(PCWSTR(title.as_ptr()));
+        // An error here is the user cancelling.
+        dialog.Show(None).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path.map(PathBuf::from)
+    }
 }
 
 // ── Island window ─────────────────────────────────────────────────────────────
@@ -224,39 +305,6 @@ fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
         return None;
     }
     Some(HWND(raw as *mut _))
-}
-
-/// Lets dropped files reach the app again.
-///
-/// wry installs its drop target by walking the webview's child windows **once**,
-/// when the webview is created. WebView2 creates `Chrome_RenderWidgetHostHWND`
-/// later and registers its own target on it; being the innermost window, that one
-/// wins, and since the page has no HTML5 drop handler it refuses everything — the
-/// "no drop" cursor, with nothing reaching Tauri. Revoking it makes OLE fall
-/// through to the target wry registered on the parent widget, which is the one
-/// that feeds Tauri's drag events.
-///
-/// Cheap and idempotent, so it is simply re-run whenever a drag might be starting.
-pub fn unblock_webview_drops(app: &AppHandle) {
-    for label in [WINDOW_LABEL, "settings"] {
-        let Some(win) = app.get_webview_window(label) else { continue };
-        let Some(hwnd) = hwnd_of(&win) else { continue };
-        unsafe {
-            let _ = EnumChildWindows(Some(hwnd), Some(revoke_render_widget), LPARAM(0));
-        }
-    }
-}
-
-unsafe extern "system" fn revoke_render_widget(hwnd: HWND, _: LPARAM) -> BOOL {
-    let mut name = [0u16; 64];
-    let len = unsafe { GetClassNameW(hwnd, &mut name) };
-    if len > 0 {
-        let class = String::from_utf16_lossy(&name[..len as usize]);
-        if class == "Chrome_RenderWidgetHostHWND" {
-            let _ = unsafe { RevokeDragDrop(hwnd) };
-        }
-    }
-    true.into()
 }
 
 /// WS_EX_NOACTIVATE keeps clicks from stealing focus; WS_EX_TOOLWINDOW keeps the

@@ -3,15 +3,19 @@
 // the conversation: each turn is a line on its stdin, answered by a result
 // event. If it dies or must restart, the next one resumes the same session.
 //
-// The CLI runs in --restricted mode: no tool that runs commands or writes,
-// read-only file tools confined to the inbox (where dropped files land) and
-// the folders of live coding sessions, and the user's own settings files are
-// not loaded — their hooks included, so the chat never shows up in the island
-// as if it were a coding session.
+// The CLI runs in --restricted mode: no tool that runs commands, file tools
+// confined to its own folder (C:\Frank), the inbox (where dropped files land)
+// and the project folders Claude Code works in, and the user's own settings
+// files are not loaded — their hooks included, so the chat never shows up in
+// the island as if it were a coding session.
 //
-// The one way the chat reaches beyond reading: when the user asks it to, it
-// passes an instruction to one of their other Claude Code sessions (ListAgents
-// + SendMessage). That session then works under its own permission settings.
+// It writes in exactly one place: its memory, C:\Frank\memory. Writing is
+// allowed by a single Edit(memory/**) rule and the permission mode refuses
+// everything else, so the project folders it reads stay read-only.
+//
+// The one way the chat reaches further: when the user asks it to, it passes an
+// instruction to one of their other Claude Code sessions (ListAgents +
+// SendMessage). That session then works under its own permission settings.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -23,7 +27,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 
 use crate::claude::{ChatContext, ChatReply};
-use crate::{files, platform, settings};
+use crate::{files, office, platform, settings, tools};
 
 /// Model alias handed to `--model`. Sonnet answers fast and well without eating
 /// through the plan the way Opus does.
@@ -33,10 +37,43 @@ pub const DEFAULT_MODEL: &str = "sonnet";
 const TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Read for dropped files (PDFs and images included) and, with Glob and Grep,
-/// the project folders of live sessions; the web for the rest; ListAgents and
-/// SendMessage to hand an instruction to another session. Nothing that writes
-/// a file or runs a command.
-const TOOLS: &str = "Read,Glob,Grep,WebSearch,WebFetch,ListAgents,SendMessage";
+/// the project folders; Write and Edit for the memory; the web for the rest;
+/// ListAgents and SendMessage to hand an instruction to another session.
+/// Nothing that runs a command.
+const TOOLS: &str = "Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,ListAgents,SendMessage";
+
+/// What runs without asking — and with --permission-mode dontAsk, nothing else
+/// runs at all. Edit(path) rules cover every file-writing tool, and a relative
+/// path is taken from the working folder: writes go to C:\Frank\memory only.
+const ALLOWED: &str = "Read,Glob,Grep,Edit(memory/**),WebSearch,WebFetch,ListAgents,SendMessage";
+
+/// The connected services (tools.rs), and what the chat may reach at all.
+const SERVICES_PROMPT: &str = "Through your frank tools you can use the services the user connected to \
+Frank: GitHub, Vercel, Stripe, Resend, Notion, Cal.com and n8n. Connected right now: {connected}. Use them \
+whenever the user asks about these services. A service that is not connected says so when you call it: \
+tell the user they can add its key in Frank's Settings, Integrations. Reading is immediate. An action \
+(opening an issue or a comment, sending an email, creating or adding to a Notion page, starting or \
+switching an n8n workflow) only happens after the user presses Allow on Frank's screen: call the tool \
+with exactly what you mean to do, and if it comes back declined, say so and do not try again. Stripe is \
+read-only. You work on this computer only: besides the web and these services, never reach anything \
+elsewhere, and message only the Claude Code sessions ListAgents shows on this computer, never a cloud \
+session or one on another machine.";
+
+/// The memory index past this is cut short in the prompt; the notes it points
+/// to can always be read in full.
+const MAX_MEMORY_INDEX: usize = 8 * 1024;
+
+/// How the chat keeps its memory, added to the system prompt with the index.
+const MEMORY_PROMPT: &str = "You have a memory that lasts from one conversation to the next: the memory \
+folder in your working folder ({memory}). memory/MEMORY.md is its index, shown below. Save a memory when \
+the user tells you something about themselves, the people and projects in their life, their preferences \
+or plans, or asks you to remember something: write one short Markdown note per fact in the memory folder, \
+named for it (for example memory/sister-birthday.md), then add a one-line pointer to it in \
+memory/MEMORY.md. Check the index first and update a note rather than making a second one; correct or \
+delete a note that turns out wrong. Read a note when it bears on what the user asks. Never save \
+passwords, keys, card numbers or other secrets. When the user asks what you remember, answer from the \
+index and the notes. Saving notes is the only writing you can do: every other file on this computer is \
+read-only for you.";
 
 /// Replaces Claude Code's own coding-agent prompt: shorter, so every turn costs
 /// less of the plan, and written for a chat at the top of the screen.
@@ -102,23 +139,36 @@ pub async fn send(
         .ok_or_else(|| "Claude Code not found. Install it, then sign in once with `claude`.".to_string())?;
 
     // The CLI names a session after its working folder, and that name is what
-    // other sessions see on a message from the chat — so it runs in "frank".
-    // Dropped files are read from the inbox, opened up beside it.
-    let dir = settings::local_dir().join("frank");
+    // other sessions see on a message from the chat — so it runs in "Frank",
+    // C:\Frank, where its memory lives. Dropped files are read from the inbox,
+    // opened up beside it.
+    let dir = platform::frank_home();
     let inbox = files::inbox_dir();
     platform::ensure_private_dir(&settings::local_dir()).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("memory"))
+        .map_err(|e| format!("Could not create Frank's folder {}: {e}", dir.display()))?;
     std::fs::create_dir_all(&inbox).map_err(|e| e.to_string())?;
 
     // The island sends a file once, with the first message after it was dropped
     // or pasted — which may be mid-conversation for a pasted screenshot.
     let mut prompt = String::new();
     match &context {
-        Some(ChatContext::File { name, path }) => {
-            prompt.push_str(&format!(
+        // A Word document is handed over as the text pulled out of it: the
+        // Read tool takes text, images and PDFs, not .docx.
+        Some(ChatContext::File { name, path }) => match office::readable_copy(Path::new(path)) {
+            Some(Ok(text)) => prompt.push_str(&format!(
+                "The user attached a Word document named \"{name}\" (at {path}). Its text has been \
+                 extracted to {}. Read that file before answering.\n\n",
+                text.display()
+            )),
+            Some(Err(err)) => prompt.push_str(&format!(
+                "The user attached a file named \"{name}\" at {path}, but its text could not be read \
+                 ({err}). Tell them so, and ask for a PDF or a .docx instead.\n\n"
+            )),
+            None => prompt.push_str(&format!(
                 "The user attached a file named \"{name}\". It is at {path}. Read it before answering.\n\n"
-            ));
-        }
+            )),
+        },
         Some(ChatContext::Window { app_name, title, url }) => {
             prompt.push_str(&format!("Context — App: {app_name}, Window: {title}"));
             if let Some(url) = url {
@@ -222,11 +272,18 @@ fn start(
         "dontAsk",
         "--tools",
         TOOLS,
-        "--allowedTools",
-        TOOLS,
-        "--system-prompt",
-        SYSTEM_PROMPT,
     ]);
+    // Frank's own tool server, and only it: --strict-mcp-config keeps every
+    // other MCP configuration out, the Claude account's connectors included.
+    // Its tools are allowed as a whole; the actions among them ask the user
+    // themselves, on the island, before they do anything.
+    if tools::ready() {
+        cmd.arg("--mcp-config").arg(tools::config_file());
+        cmd.arg("--allowedTools").arg(format!("{ALLOWED},mcp__{}", tools::SERVER_NAME));
+    } else {
+        cmd.arg("--allowedTools").arg(ALLOWED);
+    }
+    cmd.arg("--system-prompt").arg(system_prompt(&dir.join("memory")));
     if model != "default" {
         cmd.args(["--model", model]);
     }
@@ -260,6 +317,32 @@ fn start(
         model: model.to_string(),
         dirs: read_dirs.to_vec(),
     })
+}
+
+/// The chat's instructions, its memory rules, and the memory index as it is
+/// now: read again whenever the process starts, so a conversation begins with
+/// everything saved in the ones before.
+fn system_prompt(memory: &Path) -> String {
+    let index = std::fs::read_to_string(memory.join("MEMORY.md")).unwrap_or_default();
+    let index = index.trim();
+    let index = if index.is_empty() {
+        "(empty: nothing saved yet)".to_string()
+    } else if index.len() > MAX_MEMORY_INDEX {
+        let mut cut = MAX_MEMORY_INDEX;
+        while !index.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}\n(cut short here: read memory/MEMORY.md for the rest)", &index[..cut])
+    } else {
+        index.to_string()
+    };
+    let rules = MEMORY_PROMPT.replace("{memory}", &memory.display().to_string());
+    let connected = tools::connected();
+    let services = SERVICES_PROMPT.replace(
+        "{connected}",
+        &if connected.is_empty() { "none yet".to_string() } else { connected.join(", ") },
+    );
+    format!("{SYSTEM_PROMPT}\n\n{services}\n\n{rules}\n\nmemory/MEMORY.md now:\n{index}")
 }
 
 /// The `{"type":"result",…}` event that ends a turn, among the stream-json
@@ -298,7 +381,24 @@ fn claude_exe() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::result_event;
+    use super::{result_event, system_prompt, MAX_MEMORY_INDEX};
+
+    #[test]
+    fn the_memory_index_rides_in_the_system_prompt() {
+        let dir = std::env::temp_dir().join(format!("frank-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(system_prompt(&dir).ends_with("(empty: nothing saved yet)"));
+
+        std::fs::write(dir.join("MEMORY.md"), "- [Sister](sister.md) — birthday 12 May\n").unwrap();
+        let prompt = system_prompt(&dir);
+        assert!(prompt.contains("birthday 12 May"));
+        assert!(prompt.contains(&*dir.display().to_string()), "the rules name the real folder");
+
+        // A huge index is cut on a character boundary, never mid-letter.
+        std::fs::write(dir.join("MEMORY.md"), "ş".repeat(MAX_MEMORY_INDEX)).unwrap();
+        assert!(system_prompt(&dir).contains("(cut short here"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn only_the_result_event_ends_a_turn() {

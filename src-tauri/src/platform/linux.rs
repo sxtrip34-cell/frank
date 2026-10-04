@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
-use tauri::{AppHandle, WebviewWindow};
+use tauri::WebviewWindow;
 
 use super::{home_dir, LocalTime};
 use crate::i18n::Lang;
@@ -50,6 +50,11 @@ pub fn config_dir() -> PathBuf {
 /// every launch.
 pub fn local_dir() -> PathBuf {
     xdg("XDG_DATA_HOME", ".local/share").join("frank")
+}
+
+/// ~/Frank — the chat's own folder, where Frank keeps his memory.
+pub fn frank_home() -> PathBuf {
+    super::home_dir().join("Frank")
 }
 
 /// Environment the webview must inherit, set before any thread or process
@@ -184,6 +189,20 @@ pub fn left_button_down() -> bool {
     false
 }
 
+pub fn escape_down() -> bool {
+    false
+}
+
+/// Not read on Linux: Ctrl+V pastes text and images only.
+pub fn clipboard_files() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// No native Open dialog wired up on Linux yet: files are dropped instead.
+pub fn pick_file(_title: &str) -> Option<PathBuf> {
+    None
+}
+
 // ── Island window ─────────────────────────────────────────────────────────────
 
 /// The few gtk-layer-shell calls we need, straight from the C library.
@@ -221,9 +240,6 @@ fn gtk_window_ptr(win: &gtk::ApplicationWindow) -> *mut gtk::ffi::GtkWindow {
     let w: &gtk::Window = win.upcast_ref();
     w.to_glib_none().0
 }
-
-/// WebKitGTK has no competing drop target to remove.
-pub fn unblock_webview_drops(_app: &AppHandle) {}
 
 /// Turns the island into an overlay surface on the top edge that never takes
 /// the keyboard. Must run before the window is first shown: a layer surface

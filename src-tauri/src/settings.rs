@@ -45,11 +45,27 @@ pub struct Settings {
     pub island_pos: Option<IslandPos>,
 }
 
-/// The island's top centre, in logical pixels from the display's top-left.
+/// Where the island sits, in logical pixels from the top-left of the display's
+/// work area (the screen minus the taskbar): `x` is the island's centre, `y` its
+/// top. Docked to the top edge only `x` counts, docked to a side only `y`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct IslandPos {
     pub x: f64,
     pub y: f64,
+    /// Positions saved before docking existed are free ones.
+    #[serde(default)]
+    pub dock: Dock,
+}
+
+/// The edge the island is attached to, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dock {
+    Top,
+    Left,
+    Right,
+    #[default]
+    Free,
 }
 
 fn default_wake_word() -> String {

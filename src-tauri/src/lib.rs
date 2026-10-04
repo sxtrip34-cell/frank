@@ -8,11 +8,14 @@ mod i18n;
 mod integrations;
 mod island;
 mod log;
+mod office;
 mod pipe;
+mod placement;
 mod platform;
 mod secrets;
 mod sessions;
 mod settings;
+mod tools;
 mod tray;
 mod voice;
 
@@ -146,39 +149,19 @@ fn reposition(app: AppHandle, shared: State<Shared>) {
     island::apply_geometry(&app, &pref, collapsed, pos);
 }
 
-/// The user pressed on the island and moved: Windows moves the window from
-/// here, like any window dragged by its title bar. Once the button is up, the
-/// new place is remembered — or, dropped near the top edge, the island docks
-/// at the top centre again.
+/// The user pressed on the island and moved: it follows the mouse until the
+/// button is let go (island::spawn_drag). `grab_x`/`grab_y` is where it was
+/// taken hold of, in logical pixels from the island's top-left corner.
 #[tauri::command]
-fn start_island_drag(app: AppHandle) {
-    let Some(win) = island::window(&app) else { return };
-    if win.start_dragging().is_err() {
-        return;
-    }
-    std::thread::spawn(move || {
-        // The move loop runs on the window's own thread; wait it out.
-        let started = std::time::Instant::now();
-        while platform::left_button_down() && started.elapsed() < std::time::Duration::from_secs(120) {
-            std::thread::sleep(std::time::Duration::from_millis(30));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(60));
+fn island_drag_begin(app: AppHandle, grab_x: f64, grab_y: f64) {
+    island::spawn_drag(app, (grab_x, grab_y));
+}
 
-        let shared = app.state::<Shared>();
-        let updated = {
-            let mut current = shared.settings.lock().unwrap();
-            current.island_pos = island::dropped_position(&app, &current.screen);
-            current.clone()
-        };
-        if let Err(err) = settings::save(&updated) {
-            log::line(format!("could not save the island position: {err}"));
-        }
-        // Clamp it onto the display, or snap it back to the top.
-        let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
-        island::apply_geometry(&app, &updated.screen, collapsed, updated.island_pos);
-        island::refresh_click_through(&app, &shared.gate);
-        let _ = app.emit("settings-changed", updated);
-    });
+/// Where the island hangs inside the window, for a page that loaded after
+/// Rust last placed it.
+#[tauri::command]
+fn island_anchor(shared: State<Shared>) -> island::Anchor {
+    *shared.gate.anchor.lock().unwrap()
 }
 
 #[tauri::command]
@@ -314,7 +297,7 @@ async fn chat_send(
         let cli = if voice { s.cli_voice_model.clone() } else { s.cli_model.clone() };
         (s.chat_provider.clone(), s.model.clone(), cli)
     };
-    let briefing = sessions::brief(sessions.unwrap_or_default(), sessions::known_folders()).await;
+    let briefing = sessions::brief(sessions.unwrap_or_default(), sessions::claude_projects(), sessions::desktop_folders()).await;
 
     let mut prompt = String::new();
     if voice {
@@ -345,6 +328,30 @@ fn chat_reset(chat: State<Chat>, cli_chat: State<CliChat>) {
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
     files::ingest(&path)
+}
+
+/// The chat's paperclip: Windows' Open dialog, then the chosen file copied into
+/// the inbox. None when the dialog is cancelled.
+#[tauri::command]
+async fn pick_file(title: String) -> Result<Option<DroppedFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || match platform::pick_file(&title) {
+        Some(path) => files::ingest(&path.to_string_lossy()).map(Some),
+        None => Ok(None),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ctrl+V in the chat after copying a file in Explorer: the first copied file,
+/// into the inbox. None when the clipboard holds no files.
+#[tauri::command]
+async fn paste_file() -> Result<Option<DroppedFile>, String> {
+    tauri::async_runtime::spawn_blocking(|| match platform::clipboard_files().into_iter().next() {
+        Some(path) => files::ingest(&path.to_string_lossy()).map(Some),
+        None => Ok(None),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Whether whisper.cpp, Piper and their models are in place.
@@ -383,6 +390,50 @@ fn ingest_image(request: tauri::ipc::Request<'_>) -> Result<DroppedFile, String>
         tauri::ipc::InvokeBody::Raw(bytes) => files::ingest_image(bytes),
         _ => Err("Expected image bytes.".into()),
     }
+}
+
+/// Allow or Deny on the island for an action the chat wants to take with one
+/// of the connected services (tools.rs waits for it).
+#[tauri::command]
+fn tool_decision(request_id: String, allow: bool) {
+    tools::decide(&request_id, allow);
+}
+
+/// Saves a file dropped on the island: its bytes as the raw request body, its
+/// name (URI-encoded) in the `x-file-name` header.
+#[tauri::command]
+fn ingest_dropped(request: tauri::ipc::Request<'_>) -> Result<DroppedFile, String> {
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_default();
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => files::ingest_bytes(&name, bytes),
+        _ => Err("Expected the file's bytes.".into()),
+    }
+}
+
+/// Undoes encodeURIComponent: a header carries only ASCII.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = || std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex()) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The island may only ask whether a key exists — never read it.
@@ -520,7 +571,8 @@ pub fn run() {
             set_island_rect,
             focus_window,
             reposition,
-            start_island_drag,
+            island_drag_begin,
+            island_anchor,
             open_url,
             open_in_vscode,
             quit_app,
@@ -534,6 +586,10 @@ pub fn run() {
             chat_send,
             chat_reset,
             ingest_file,
+            ingest_dropped,
+            tool_decision,
+            pick_file,
+            paste_file,
             ingest_image,
             voice_status,
             voice_warm,
@@ -569,9 +625,16 @@ pub fn run() {
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 
             log::line(format!("--- Frank {} started ---", env!("CARGO_PKG_VERSION")));
+            // Frank's own folder, with his memory: there from the start, so the
+            // user can find it before the first chat.
+            let memory = platform::frank_home().join("memory");
+            if let Err(err) = std::fs::create_dir_all(&memory) {
+                log::line(format!("could not create {}: {err}", memory.display()));
+            }
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            tools::start(handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

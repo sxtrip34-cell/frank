@@ -91,6 +91,41 @@ pub fn ingest_image(bytes: &[u8]) -> Result<DroppedFile, String> {
     })
 }
 
+/// Largest file accepted by drag and drop. It arrives through the page as
+/// bytes, so the cap keeps a stray video from being read into memory.
+pub const MAX_DROPPED: u64 = 200 * 1024 * 1024;
+
+/// Saves a file dropped on the island. HTML5 drag and drop hands the page the
+/// file's name and bytes but not its path, so the bytes are written into the
+/// inbox under that name (stripped of anything that could point elsewhere).
+pub fn ingest_bytes(name: &str, bytes: &[u8]) -> Result<DroppedFile, String> {
+    if bytes.len() as u64 > MAX_DROPPED {
+        return Err("That file is too large to drop (200 MB at most).".into());
+    }
+    // Only the last component, and nothing Windows would refuse or treat as a
+    // device: a dropped name is the sender's, not ours.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = base
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"|?*"#.contains(c) { '_' } else { c })
+        .collect();
+    let clean = clean.trim().trim_matches('.').to_string();
+    let name = if clean.is_empty() { "file".to_string() } else { clean };
+
+    let dir = inbox_dir();
+    crate::platform::ensure_private_dir(&settings::local_dir()).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = free_path(&dir, &name);
+    std::fs::write(&dest, bytes).map_err(|e| format!("cannot save the file: {e}"))?;
+    sweep(&dir);
+
+    Ok(DroppedFile {
+        name: dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(name),
+        path: dest.to_string_lossy().to_string(),
+        size: bytes.len() as u64,
+    })
+}
+
 /// `dir/name`, or `dir/stem (2).ext` and so on when that is taken: a second
 /// file of the same name never overwrites the first.
 fn free_path(dir: &Path, name: &str) -> PathBuf {
@@ -186,5 +221,24 @@ mod tests {
 
         let _ = std::fs::remove_file(&first.path);
         let _ = std::fs::remove_file(&second.path);
+    }
+
+    #[test]
+    fn dropped_bytes_land_in_the_inbox_under_a_safe_name() {
+        let file = ingest_bytes("rapor.docx", b"PK\x03\x04 not really").unwrap();
+        assert!(file.name.starts_with("rapor") && file.name.ends_with(".docx"), "{}", file.name);
+        assert!(Path::new(&file.path).starts_with(inbox_dir()));
+        assert_eq!(std::fs::read(&file.path).unwrap(), b"PK\x03\x04 not really");
+
+        // A name trying to leave the inbox keeps only its last part.
+        let sneaky = ingest_bytes(r"..\..\evil:name?.txt", b"x").unwrap();
+        assert!(Path::new(&sneaky.path).starts_with(inbox_dir()));
+        assert_eq!(sneaky.name.replace(" (2)", ""), "evil_name_.txt");
+        let nameless = ingest_bytes("...", b"y").unwrap();
+        assert!(nameless.name.starts_with("file"));
+
+        for f in [&file, &sneaky, &nameless] {
+            let _ = std::fs::remove_file(&f.path);
+        }
     }
 }

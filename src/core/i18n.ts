@@ -21,6 +21,7 @@ const EN = {
   "empty.sub": "Drop a file or window, or ask me anything.",
   "empty.ask": "Ask Claude",
   "approval.who": "needs permission",
+  "approval.frank": "wants to do this for you",
   "approval.deny": "Deny",
   "approval.allow": "Allow",
   "question.who": "Claude Code is asking a question",
@@ -48,6 +49,9 @@ const EN = {
   "chat.placeholder.more": "Continue…",
   "chat.voice": "Voice chat",
   "chat.send": "Send",
+  "chat.attach": "Attach a file",
+  "chat.attach.dialog": "Attach a file to the chat",
+  "chat.attach.remove": "Remove the file",
   "chat.voice.listening": "Listening… just talk",
   "chat.voice.transcribing": "Got it…",
   "chat.voice.thinking": "Thinking…",
@@ -195,8 +199,10 @@ const EN = {
   "settings.general.position": "Island position",
   "settings.general.positionTop": "At the top of the screen",
   "settings.general.positionFree": "Where you put it",
+  "settings.general.positionLeft": "Docked to the left edge",
+  "settings.general.positionRight": "Docked to the right edge",
   "settings.general.positionReset": "Back to the top",
-  "settings.general.positionHint": "Drag the island anywhere with the mouse. Drop it at the top edge to put it back.",
+  "settings.general.positionHint": "Drag the island anywhere with the mouse. Let go near the top, left or right edge and it docks there; at the sides it becomes a slim tab. Escape while dragging puts it back.",
 };
 
 export type MessageKey = keyof typeof EN;
@@ -213,6 +219,7 @@ const TR: Record<MessageKey, string> = {
   "empty.sub": "Dosya ya da pencere bırak, ya da bana sor.",
   "empty.ask": "Claude'a sor",
   "approval.who": "izin istiyor",
+  "approval.frank": "senin için bunu yapmak istiyor",
   "approval.deny": "Reddet",
   "approval.allow": "İzin ver",
   "question.who": "Claude Code bir soru soruyor",
@@ -239,6 +246,9 @@ const TR: Record<MessageKey, string> = {
   "chat.placeholder.more": "Devam et…",
   "chat.voice": "Sesli sohbet",
   "chat.send": "Gönder",
+  "chat.attach": "Dosya ekle",
+  "chat.attach.dialog": "Sohbete dosya ekle",
+  "chat.attach.remove": "Dosyayı kaldır",
   "chat.voice.listening": "Dinliyorum… konuşabilirsin",
   "chat.voice.transcribing": "Anladım…",
   "chat.voice.thinking": "Düşünüyorum…",
@@ -380,8 +390,10 @@ const TR: Record<MessageKey, string> = {
   "settings.general.position": "Ada konumu",
   "settings.general.positionTop": "Ekranın üstünde",
   "settings.general.positionFree": "Senin koyduğun yerde",
+  "settings.general.positionLeft": "Sol kenara yapışık",
+  "settings.general.positionRight": "Sağ kenara yapışık",
   "settings.general.positionReset": "Üste geri al",
-  "settings.general.positionHint": "Adayı fareyle istediğin yere sürükle. Üst kenara bırakırsan eski yerine döner.",
+  "settings.general.positionHint": "Adayı fareyle istediğin yere sürükle. Üst, sol ya da sağ kenarın yakınında bırakırsan oraya yapışır; yanlarda ince bir sekmeye dönüşür. Sürüklerken Esc'ye basarsan eski yerine döner.",
 };
 
 const RU: Record<MessageKey, string> = {
@@ -396,6 +408,7 @@ const RU: Record<MessageKey, string> = {
   "empty.sub": "Перетащи файл или окно — или просто спроси.",
   "empty.ask": "Спросить Claude",
   "approval.who": "просит разрешения",
+  "approval.frank": "хочет сделать это для тебя",
   "approval.deny": "Запретить",
   "approval.allow": "Разрешить",
   "question.who": "Claude Code задаёт вопрос",
@@ -422,6 +435,9 @@ const RU: Record<MessageKey, string> = {
   "chat.placeholder.more": "Продолжай…",
   "chat.voice": "Голосовой чат",
   "chat.send": "Отправить",
+  "chat.attach": "Прикрепить файл",
+  "chat.attach.dialog": "Прикрепить файл к чату",
+  "chat.attach.remove": "Убрать файл",
   "chat.voice.listening": "Слушаю… просто говори",
   "chat.voice.transcribing": "Понял…",
   "chat.voice.thinking": "Думаю…",
@@ -563,8 +579,10 @@ const RU: Record<MessageKey, string> = {
   "settings.general.position": "Положение острова",
   "settings.general.positionTop": "Вверху экрана",
   "settings.general.positionFree": "Там, где ты оставил",
+  "settings.general.positionLeft": "Прикреплён к левому краю",
+  "settings.general.positionRight": "Прикреплён к правому краю",
   "settings.general.positionReset": "Вернуть наверх",
-  "settings.general.positionHint": "Перетащи остров мышью куда угодно. Отпусти у верхнего края, и он вернётся на место.",
+  "settings.general.positionHint": "Перетащи остров мышью куда угодно. Отпусти у верхнего, левого или правого края, и он прикрепится к нему; по бокам он становится узкой вкладкой. Esc во время перетаскивания вернёт его на место.",
 };
 
 const DICTIONARIES: Record<Lang, Record<MessageKey, string>> = { en: EN, tr: TR, ru: RU };

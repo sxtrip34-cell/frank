@@ -19,7 +19,9 @@
 - **Chats with Claude** through your own Claude subscription — **no API key**.
 - **Talks with you** — say **"Frank"** and he listens, answers out loud and keeps listening. Say his name again to interrupt him.
 - **Speaks your language** — understands Turkish, Russian and English, and answers in the language you used. The interface is in all three too.
-- **Knows your projects** — ask *"how is my website project doing?"*: he reads the project folder (read-only) and tells you.
+- **Knows your projects** — every folder Claude Code works in on your computer, whichever app runs it. Ask *"how is my website project doing?"*: he reads the project folder (read-only) and tells you.
+- **Works with your services** — connect GitHub, Vercel, Stripe, Resend, Notion, Cal.com or n8n in Settings, and ask: *"did the last deploy go through?"*, *"what's open in my repo?"*. He can also act — open an issue, send an email, write to Notion, start an n8n workflow — but only after you press **Allow** on the card that shows exactly what he will do. Stripe is read-only.
+- **Remembers you** — tell him something worth keeping, or say *"remember that …"*: he writes it down in his memory, `C:\Frank\memory`, and knows it in every conversation after.
 - **Passes instructions on** — *"Frank, tell the website project to make the header bigger"*: he sends it to the Claude Code session working there.
 - **Looks at things for you** — paste a screenshot (**Win + Shift + S**, then **Ctrl + V**) or drop a file on him, and ask about it.
 
@@ -75,6 +77,10 @@ To check that your download is the real one, run `Get-FileHash Frank-Windows-set
 |---|---|
 | Move the mouse to the top centre of the screen | He peeks out |
 | Click him | The island opens |
+| Drag the island with the mouse | It stays where you let go, always fully on screen; near an edge, that edge lights up |
+| Let go near the top edge | It docks there, where you left it (in the middle it takes its own place) |
+| Let go near the left or right edge | It docks there as a slim tab that slides into the edge; a line of light shows where, hover it to bring him back |
+| Press **Esc** while dragging | It goes back where it was |
 | Say **"Frank"** (wake word on) | He opens and listens |
 | Say **"Frank, …"** with a request in one breath | He does it right away |
 | Say **"Frank"** while he is talking | He stops and listens |
@@ -89,8 +95,10 @@ A spoken conversation ends by itself after about 15 seconds of silence.
 
 - No telemetry, no account of its own.
 - Voice is transcribed and spoken **on your computer**; only the text of your request goes to Claude, through your own Claude Code.
-- Frank reads your project folders only when you ask about them, and can never change them himself. Instructions you give him for a project are carried out by your own Claude Code session there, under its own permission settings.
-- Keys for optional integrations live in the Windows Credential Manager, never on disk.
+- Frank can read, never change, every folder Claude Code has worked in on your computer in the last 60 days, and looks into one when you ask about it. Instructions you give him for a project are carried out by your own Claude Code session there, under its own permission settings.
+- Frank's memory is plain text in `C:\Frank\memory`: one short note per thing he remembers, and an index, `MEMORY.md`. It is the only place he can write. Read, edit or delete it whenever you like, or ask him *"what do you remember about me?"*. He never saves passwords or keys.
+- Keys for optional integrations live in the Windows Credential Manager, never on disk. Claude never sees them: Frank makes the calls himself and hands back the answer.
+- Frank's tools are served only on this computer (127.0.0.1, with a password made fresh at every start), and his chat loads no other MCP server — not even your Claude account's connectors. He reaches the web, the services you connected and the Claude Code sessions on this computer, nothing else.
 
 ## Troubleshooting
 

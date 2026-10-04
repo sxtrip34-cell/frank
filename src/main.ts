@@ -5,7 +5,8 @@ import { Bridge, IS_TAURI, onEvent } from "./core/bridge";
 import { lang } from "./core/i18n";
 import { Sound } from "./core/sound";
 import {
-  State, type ChatMessage, type IntegrationInfo, type LiveSession, type Settings,
+  State, type ChatMessage, type Dock, type IntegrationInfo, type IslandAnchor, type LiveSession,
+  type Settings,
 } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
@@ -96,6 +97,44 @@ async function main() {
   if (boot && !boot.cursorPoll) island.followPageCursor();
 
   await onEvent<{ x: number; y: number }>("cursor", ({ x, y }) => island.onCursor(x, y));
+
+  // Where Rust hangs the island inside its window: now (it placed the window
+  // before this page loaded), after every move, and while it is dragged.
+  const anchor = await Bridge.islandAnchor();
+  if (anchor) island.onAnchor(anchor);
+  await onEvent<IslandAnchor>("island-anchor", (a) => island.onAnchor(a));
+  await onEvent<{ dock: Dock | null }>("island-drag-dock", ({ dock }) => island.onDragDock(dock));
+  await onEvent<null>("island-drag-end", () => island.onDragEnd());
+
+  // An action the chat wants to take with a connected service (an email, an
+  // issue, a Notion page, an n8n workflow) waits in Rust until Allow or Deny on
+  // the card. One card at a time: an ask that arrives while another approval
+  // is up waits its turn.
+  type ToolAsk = { requestId: string; title: string; detail: string };
+  const toolAsks: ToolAsk[] = [];
+  const showToolAsk = () => {
+    if (State.pendingApproval || toolAsks.length === 0) return;
+    const ask = toolAsks.shift()!;
+    State.pendingApproval = { requestId: ask.requestId, sessionId: "", tool: ask.title, command: ask.detail, source: "frank" };
+    State.isPinned = true;
+    Sound.play("approval");
+    island.alert("approval");
+  };
+  State.subscribe(showToolAsk);
+  await onEvent<ToolAsk>("tool-approval", (ask) => {
+    toolAsks.push(ask);
+    showToolAsk();
+  });
+  // Unanswered in time: Rust has refused it already, so the card goes.
+  await onEvent<string>("tool-approval-closed", (id) => {
+    const queued = toolAsks.findIndex((a) => a.requestId === id);
+    if (queued >= 0) toolAsks.splice(queued, 1);
+    if (State.pendingApproval?.requestId !== id) return;
+    State.pendingApproval = null;
+    State.isPinned = false;
+    island.dropPin();
+    island.setView("prompt");
+  });
 
   /** Pause has to reach Rust too, or the pollers keep calling out. */
   const setPaused = (on: boolean) => {

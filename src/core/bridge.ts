@@ -4,8 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { IslandAnchor, Settings } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -51,7 +50,9 @@ export const Bridge = {
   reposition: () => call<void>("reposition"),
 
   /** Hands the island to Windows to move, like a window by its title bar. */
-  startIslandDrag: () => call<void>("start_island_drag"),
+  /** The island follows the mouse from here; grab is where it was taken hold of. */
+  islandDragBegin: (grabX: number, grabY: number) => call<void>("island_drag_begin", { grabX, grabY }),
+  islandAnchor: () => call<IslandAnchor>("island_anchor"),
 
   openUrl: (url: string) => call<void>("open_url", { url }),
 
@@ -94,10 +95,27 @@ export const Bridge = {
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
+  /** Allow or Deny for an action the chat wants to take with a connected service. */
+  toolDecision: (requestId: string, allow: boolean) => call<void>("tool_decision", { requestId, allow }),
+  /** Windows' Open dialog; the chosen file lands in the inbox. null: cancelled. */
+  pickFile: (title: string) => callOrThrow<DroppedFile | null>("pick_file", { title }),
+  /** The file copied in Explorer, into the inbox. null: no file on the clipboard. */
+  pasteFile: () => callOrThrow<DroppedFile | null>("paste_file"),
   /** Saves a pasted image into the inbox. The PNG goes over as the raw body. */
   ingestImage: async (png: Uint8Array): Promise<DroppedFile> => {
     if (!IS_TAURI) throw new Error("not running inside Frank");
     return invoke<DroppedFile>("ingest_image", png);
+  },
+  /**
+   * A file dropped on the island, into the inbox. HTML5 drag and drop gives
+   * the page a name and the bytes but no path, so the bytes are sent across.
+   */
+  ingestDropped: async (file: File): Promise<DroppedFile> => {
+    if (!IS_TAURI) throw new Error("not running inside Frank");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return invoke<DroppedFile>("ingest_dropped", bytes, {
+      headers: { "x-file-name": encodeURIComponent(file.name) },
+    });
   },
 
   // ── Voice (whisper.cpp + Piper, both local) ───────────────────────────────
@@ -179,19 +197,6 @@ export type BridgeEvent =
   | { name: "tray"; payload: string }
   | { name: "hook"; payload: Record<string, unknown> }
   | { name: "screen-changed"; payload: null };
-
-export interface DragDropPayload {
-  type: "enter" | "over" | "drop" | "leave";
-  paths?: string[];
-}
-
-/** Files dragged onto the island. Only reaches us when the window takes the mouse. */
-export async function onDragDrop(handler: (e: DragDropPayload) => void) {
-  if (!IS_TAURI) return () => {};
-  return getCurrentWebview().onDragDropEvent((event) => {
-    handler(event.payload as DragDropPayload);
-  });
-}
 
 export async function onEvent<T>(name: string, handler: (payload: T) => void) {
   if (!IS_TAURI) return () => {};

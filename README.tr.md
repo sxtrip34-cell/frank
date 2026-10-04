@@ -19,7 +19,9 @@
 - **Claude ile sohbet eder**: Kendi Claude aboneliğinle çalışır, **API anahtarı gerekmez**.
 - **Seninle konuşur**: **"Frank"** dersin, seni dinler, sesli cevap verir ve dinlemeye devam eder. Konuşurken sözünü kesmek için adını tekrar söylersin.
 - **Senin dilini konuşur**: Türkçe, Rusça ve İngilizce anlar, hangi dilde sorduysan o dilde cevap verir. Arayüzü de üç dilde.
-- **Projelerini bilir**: *"Web sitesi projem ne durumda?"* diye sorduğunda proje klasörünü okur ve anlatır. Dosyalara sadece bakar, hiçbir şeyi değiştirmez.
+- **Projelerini bilir**: Bilgisayarında Claude Code'un çalıştığı her klasörü bilir, hangi uygulamada çalışırsa çalışsın. *"Web sitesi projem ne durumda?"* diye sorduğunda proje klasörünü okur ve anlatır. Dosyalara sadece bakar, hiçbir şeyi değiştirmez.
+- **Servislerinle çalışır**: Ayarlar'dan GitHub, Vercel, Stripe, Resend, Notion, Cal.com ya da n8n bağla ve sor: *"Son deploy başarılı mı?"*, *"Depomda neler açık?"*. İşlem de yapabilir (issue açmak, e-posta göndermek, Notion'a yazmak, n8n iş akışı başlatmak), ama sadece ne yapacağını tam gösteren kartta **İzin ver**'e bastıktan sonra. Stripe sadece okunur.
+- **Seni hatırlar**: Ona akılda tutulmaya değer bir şey söylersen ya da *"şunu hatırla …"* dersen hafızasına, `C:\Frank\memory` klasörüne yazar ve sonraki her konuşmada bilir.
 - **Talimatlarını iletir**: *"Frank, web sitesi projesine söyle başlığı büyütsün"* dediğinde talimatı o projede çalışan Claude Code oturumuna gönderir.
 - **Senin için bakar**: Bir ekran görüntüsü yapıştırırsın (**Win + Shift + S**, sonra **Ctrl + V**) ya da üstüne bir dosya bırakırsın, sonra onun hakkında soru sorarsın.
 
@@ -78,6 +80,10 @@ Frank ücretsiz ve açık kaynaklı (MIT lisansı). Kullandıkları:
 |---|---|
 | Fareyi ekranın en üst ortasına götürürsün | Dışarı bakar |
 | Ona tıklarsın | Ada açılır |
+| Adayı fareyle sürüklersin | Bıraktığın yerde kalır, hep ekranın içinde durur; bir kenara yaklaşınca o kenar parlar |
+| Üst kenarın yakınında bırakırsın | Oraya, bıraktığın hizada yapışır (ortaya bırakırsan kendi yerine oturur) |
+| Sol ya da sağ kenarın yakınında bırakırsın | Oraya ince bir sekme olarak yapışır ve kenarın içine saklanır; yerini bir ışık çizgisi gösterir, üstüne gelince geri çıkar |
+| Sürüklerken **Esc**'ye basarsın | Ada eski yerine döner |
 | **"Frank"** dersin (uyandırma kelimesi açık) | Açılır ve dinler |
 | İsteğini **"Frank, …"** diye tek nefeste söylersin | Hemen yapar |
 | O konuşurken **"Frank"** dersin | Susar ve dinler |
@@ -92,8 +98,10 @@ Sesli sohbet yaklaşık 15 saniye sessizlikten sonra kendiliğinden biter.
 
 - Telemetri yok, kendi hesabı da yok.
 - Ses **senin bilgisayarında** yazıya çevrilir ve seslendirilir. Claude'a sadece isteğinin metni gider, o da kendi Claude Code'un üzerinden.
-- Frank proje klasörlerini sadece sen sorduğunda okur ve onları kendisi asla değiştiremez. Bir proje için verdiğin talimatları o projedeki kendi Claude Code oturumun, kendi izin ayarlarıyla yapar.
-- İsteğe bağlı entegrasyonların anahtarları Windows Kimlik Bilgisi Yöneticisi'nde saklanır, hiçbir zaman diske yazılmaz.
+- Frank, bilgisayarında Claude Code'un son 60 günde çalıştığı her klasörü okuyabilir ama hiçbirini değiştiremez; birine sen sorduğunda bakar. Bir proje için verdiğin talimatları o projedeki kendi Claude Code oturumun, kendi izin ayarlarıyla yapar.
+- Frank'in hafızası `C:\Frank\memory` klasöründe düz metindir: hatırladığı her şey için kısa bir not ve bir dizin (`MEMORY.md`). Yazabildiği tek yer burasıdır. İstediğin zaman okuyabilir, düzenleyebilir ya da silebilirsin; ona *"Benim hakkımda ne hatırlıyorsun?"* diye de sorabilirsin. Şifreleri ve anahtarları asla kaydetmez.
+- İsteğe bağlı entegrasyonların anahtarları Windows Kimlik Bilgisi Yöneticisi'nde saklanır, hiçbir zaman diske yazılmaz. Claude onları hiç görmez: çağrıları Frank kendisi yapar, Claude'a sadece cevabı verir.
+- Frank'in araçları sadece bu bilgisayarda sunulur (127.0.0.1, her açılışta yenilenen bir şifreyle) ve sohbeti başka hiçbir MCP sunucusu yüklemez, Claude hesabının bağlayıcıları dahil. Frank sadece internete, bağladığın servislere ve bu bilgisayardaki Claude Code oturumlarına ulaşır, başka hiçbir yere değil.
 
 ## Sorun giderme
 

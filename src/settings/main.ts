@@ -531,9 +531,16 @@ function positionRow(): HTMLElement {
     void save();
   });
   function paint() {
-    const floating = settings.islandPos != null;
-    where.textContent = t(floating ? "settings.general.positionFree" : "settings.general.positionTop");
-    reset.style.display = floating ? "" : "none";
+    const pos = settings.islandPos;
+    const dock = pos == null ? "top" : (pos.dock ?? "free");
+    where.textContent = t(
+      dock === "left" ? "settings.general.positionLeft"
+      : dock === "right" ? "settings.general.positionRight"
+      : dock === "free" ? "settings.general.positionFree"
+      : "settings.general.positionTop",
+    );
+    // Its own place is the top centre: anywhere else can be sent back there.
+    reset.style.display = pos != null ? "" : "none";
   }
   paint();
   refreshPosition = paint;

@@ -1,20 +1,24 @@
 // Island window: placement on the chosen display, the two window sizes
-// (full panel / invisible wake strip), click-through and the cursor poll.
+// (full panel / invisible wake strip), dragging, click-through and the cursor
+// poll.
 //
 // There is no notch on a PC, so the island is a black shape drawn at the top
 // centre of the main display inside a borderless, transparent, always-on-top
-// window that never takes focus. The user can drag it anywhere else on the
-// display; dropped back near the top edge, it docks there again.
+// window that never takes focus. The user can drag it anywhere on the display.
+// Let go near the top, left or right edge, it docks there (at the sides as a
+// slim tab) and hides into that edge; elsewhere it stays where it was left.
+// Where the window goes is worked out in src/placement.rs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewWindow};
 
+use crate::placement::{self, Placement, Rect, Work};
 use crate::platform::{self, cursor_physical, left_button_down};
-use crate::settings::IslandPos;
+use crate::settings::{Dock, IslandPos};
 
 /// Logical size of the full window — the largest island view, like the macOS panel.
 pub const PANEL_W: f64 = 720.0;
@@ -22,6 +26,10 @@ pub const PANEL_H: f64 = 320.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
+/// Height of the compact island docked to a side edge (SIDE_H in
+/// src/core/layout.ts). Hidden there, the wake strip stands upright: STRIP_H
+/// wide and this tall.
+pub const SIDE_H: f64 = 112.0;
 
 pub const WINDOW_LABEL: &str = "island";
 
@@ -55,6 +63,15 @@ pub struct IslandRect {
     pub h: f64,
 }
 
+/// Where the island hangs inside the full window (window-logical) and the edge
+/// it is docked to: the front end draws the island from this.
+#[derive(Serialize, Clone, Copy)]
+pub struct Anchor {
+    pub x: f64,
+    pub y: f64,
+    pub dock: Dock,
+}
+
 /// Wakes / parks the cursor poll thread so a hidden island costs literally nothing.
 pub struct PollGate {
     active: Mutex<bool>,
@@ -63,6 +80,10 @@ pub struct PollGate {
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
+    /// The island is being dragged: the window keeps the mouse throughout.
+    pub dragging: AtomicBool,
+    /// The last anchor sent, for a page that loads after it was.
+    pub anchor: Mutex<Anchor>,
 }
 
 impl PollGate {
@@ -73,6 +94,8 @@ impl PollGate {
             collapsed: AtomicBool::new(true),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
+            dragging: AtomicBool::new(false),
+            anchor: Mutex::new(Anchor { x: PANEL_W / 2.0, y: 0.0, dock: Dock::Top }),
         }
     }
 
@@ -150,32 +173,52 @@ pub fn screen_info(app: &AppHandle, pref: &str) -> ScreenInfo {
     }
 }
 
+/// The display's work area — the screen minus the taskbar — and its scale:
+/// src/placement.rs works in logical pixels from its top-left corner.
+struct Area {
+    origin: PhysicalPosition<i32>,
+    scale: f64,
+    work: Work,
+}
+
+impl Area {
+    fn of(m: &Monitor) -> Self {
+        let scale = m.scale_factor();
+        let wa = m.work_area();
+        Self {
+            origin: wa.position,
+            scale,
+            work: Work { w: wa.size.width as f64 / scale, h: wa.size.height as f64 / scale },
+        }
+    }
+
+    fn to_physical(&self, r: Rect) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
+        let s = self.scale;
+        (
+            PhysicalPosition::new(
+                self.origin.x + (r.x * s).round() as i32,
+                self.origin.y + (r.y * s).round() as i32,
+            ),
+            PhysicalSize::new((r.w * s).round().max(1.0) as u32, (r.h * s).round().max(1.0) as u32),
+        )
+    }
+
+    fn to_logical(&self, x: f64, y: f64) -> (f64, f64) {
+        ((x - self.origin.x as f64) / self.scale, (y - self.origin.y as f64) / self.scale)
+    }
+}
+
 /// Places and sizes the window. `collapsed` picks the wake strip instead of the
 /// panel; `pos` is where the user dragged the island, None for the top centre.
+/// The front end is told where the island hangs inside the window.
 pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool, pos: Option<IslandPos>) {
     let Some(win) = window(app) else { return };
     let Some(m) = target_monitor(app, pref) else { return };
-
-    let scale = m.scale_factor();
-    let mp = *m.position();
-    let ms = *m.size();
-
-    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
-    let pw = (lw * scale).round().max(1.0) as u32;
-    let ph = (lh * scale).round().max(1.0) as u32;
-    let (x, y) = match pos {
-        None => (mp.x + (ms.width as i32 - pw as i32) / 2, mp.y),
-        // The island hangs from its top centre. The whole panel stays on the
-        // display, so an island opened down there never runs off the screen.
-        Some(p) => {
-            let x = (mp.x as f64 + p.x * scale - pw as f64 / 2.0).round() as i32;
-            let y = (mp.y as f64 + p.y * scale).round() as i32;
-            (
-                x.clamp(mp.x, (mp.x + ms.width as i32 - pw as i32).max(mp.x)),
-                y.clamp(mp.y, (mp.y + ms.height as i32 - ph as i32).max(mp.y)),
-            )
-        }
-    };
+    let area = Area::of(&m);
+    let placed = placement::place(pos, area.work, collapsed);
+    let (origin, size) = area.to_physical(placed.window);
+    let (x, y) = (origin.x, origin.y);
+    let (pw, ph) = (size.width, size.height);
 
     // GTK never sizes a non-resizable window below its natural size (200 px
     // here), so on Linux the 6 px wake strip would stay a 200 px block. tao
@@ -189,24 +232,128 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool, pos: Option<
     // Moving across displays can rescale the window: re-assert the physical size.
     let _ = win.set_size(PhysicalSize::new(pw, ph));
     let _ = win.set_always_on_top(true);
+    publish_anchor(app, &placed);
 }
 
-/// Dropped within this many logical pixels of the top edge, the island goes back
-/// to its place at the top centre.
-const DOCK_SNAP: f64 = 40.0;
+fn publish_anchor(app: &AppHandle, placed: &Placement) {
+    let anchor = Anchor { x: placed.anchor.0, y: placed.anchor.1, dock: placed.dock };
+    if let Some(shared) = app.try_state::<crate::Shared>() {
+        *shared.gate.anchor.lock().unwrap() = anchor;
+    }
+    let _ = app.emit_to(WINDOW_LABEL, "island-anchor", anchor);
+}
 
-/// Where the island is now, read back from the window after the user dragged it:
-/// None when it was dropped near the top edge, to dock it there again.
-pub fn dropped_position(app: &AppHandle, pref: &str) -> Option<IslandPos> {
-    let win = window(app)?;
-    let m = target_monitor(app, pref)?;
-    let scale = m.scale_factor();
-    let mp = m.position();
-    let origin = win.outer_position().ok()?;
-    let size = win.outer_size().ok()?;
-    let x = (origin.x as f64 + size.width as f64 / 2.0 - mp.x as f64) / scale;
-    let y = (origin.y - mp.y) as f64 / scale;
-    (y > DOCK_SNAP).then_some(IslandPos { x, y })
+/// How often a drag follows the mouse.
+const DRAG_TICK: Duration = Duration::from_millis(8);
+/// A drag nobody lets go of ends by itself.
+const DRAG_LIMIT: Duration = Duration::from_secs(120);
+
+#[derive(Serialize, Clone, Copy)]
+struct DragDock {
+    dock: Option<Dock>,
+}
+
+/// Drags the island with the mouse until the button is let go. `grab` is where
+/// it was taken hold of, in logical pixels from the island's top-left corner.
+///
+/// The OS move loop behind `start_dragging` starts late (it is a posted
+/// message), never says when it ends, and lets the window wander off the
+/// screen, so the drag is run here instead: every few milliseconds the window
+/// follows the cursor, the island stays inside the work area, and the front
+/// end is told which edge it would dock to (for the preview). Escape puts it
+/// back where it was.
+pub fn spawn_drag(app: AppHandle, grab: (f64, f64)) {
+    let gate = app.state::<crate::Shared>().gate.clone();
+    if gate.dragging.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // Without a cursor to follow (Linux), the system moves the window; where
+    // it was left is not remembered then.
+    if !platform::CURSOR_POLL {
+        if let Some(win) = window(&app) {
+            let _ = win.start_dragging();
+        }
+        gate.dragging.store(false, Ordering::SeqCst);
+        return;
+    }
+    std::thread::spawn(move || {
+        run_drag(&app, &gate, grab);
+        gate.dragging.store(false, Ordering::SeqCst);
+        refresh_click_through(&app, &gate);
+        let _ = app.emit_to(WINDOW_LABEL, "island-drag-end", ());
+    });
+}
+
+fn run_drag(app: &AppHandle, gate: &PollGate, grab: (f64, f64)) {
+    let shared = app.state::<crate::Shared>();
+    let pref = shared.settings.lock().unwrap().screen.clone();
+    let Some(win) = window(app) else { return };
+    let Some(m) = target_monitor(app, &pref) else { return };
+    let area = Area::of(&m);
+    set_ignore_cursor(app, false);
+    gate.forget_ignore_state();
+
+    let started = Instant::now();
+    let mut offered: Option<Dock> = None;
+    let mut island: Option<Rect> = None;
+    let mut last_origin: Option<PhysicalPosition<i32>> = None;
+    let mut cancelled = false;
+    loop {
+        if !left_button_down() || started.elapsed() > DRAG_LIMIT {
+            break;
+        }
+        if platform::escape_down() {
+            cancelled = true;
+            break;
+        }
+        if let Some((cx, cy)) = cursor_physical() {
+            // The island's shape inside the window, as last drawn: it can
+            // change size mid-drag (an open island closing on its timer).
+            let r = *gate.rect.lock().unwrap();
+            let (lx, ly) = area.to_logical(cx, cy);
+            let (ix, iy) = placement::clamp_island(lx - grab.0, ly - grab.1, r.w, r.h, area.work);
+            let here = Rect { x: ix, y: iy, w: r.w, h: r.h };
+            island = Some(here);
+
+            let dock = placement::dock_at(here, area.work, offered);
+            if dock != offered {
+                offered = dock;
+                let _ = app.emit_to(WINDOW_LABEL, "island-drag-dock", DragDock { dock });
+            }
+
+            // The window carries the island at the same place inside it for
+            // the whole drag, so the island follows the cursor exactly; it is
+            // put back inside the screen once the island is let go.
+            let (origin, _) = area.to_physical(Rect { x: ix - r.x, y: iy - r.y, w: PANEL_W, h: PANEL_H });
+            if last_origin != Some(origin) {
+                last_origin = Some(origin);
+                let _ = win.set_position(origin);
+            }
+        }
+        std::thread::sleep(DRAG_TICK);
+    }
+    if offered.is_some() {
+        let _ = app.emit_to(WINDOW_LABEL, "island-drag-dock", DragDock { dock: None });
+    }
+
+    // Let go before the first step, it never moved: nothing to remember.
+    let dropped = island.filter(|_| !cancelled);
+    let updated = {
+        let mut current = shared.settings.lock().unwrap();
+        if let Some(here) = dropped {
+            current.island_pos = placement::drop_position(here, offered, area.work);
+        }
+        current.clone()
+    };
+    if dropped.is_some() {
+        if let Err(err) = crate::settings::save(&updated) {
+            crate::log::line(format!("could not save the island position: {err}"));
+        }
+    }
+    // Docked, or back inside the screen, or (cancelled) where it was.
+    let collapsed = gate.collapsed.load(Ordering::Relaxed);
+    apply_geometry(app, &updated.screen, collapsed, updated.island_pos);
+    let _ = app.emit("settings-changed", updated);
 }
 
 /// Position, size and scale of the monitor the island lives on. Any change here
@@ -226,7 +373,6 @@ fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
 /// visible. Parked on a condvar the rest of the time.
 pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
     std::thread::spawn(move || {
-        let mut was_down = false;
         // Remembered across wakes so a display change while hidden is noticed the
         // moment the island comes back.
         let mut last_screen: Option<(i32, i32, u32, u32, u64)> = None;
@@ -290,22 +436,13 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // registered destinations whatever ignoresMouseEvents says. So while
                 // a button is held anywhere over the panel, the whole panel takes
                 // the mouse, which also makes the drop zone as forgiving as the Mac's.
-                // A press may be the start of a drag: make sure the drop target is
-                // ours before the file arrives.
-                let down = left_button_down();
-                if down && !was_down {
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
-                }
-                was_down = down;
-
-                let dragging = down
+                let dragging = left_button_down()
                     && x >= 0.0
                     && x <= size.0
                     && y >= 0.0
                     && y <= size.1;
 
-                let accept = on_island || dragging;
+                let accept = on_island || dragging || gate.dragging.load(Ordering::Relaxed);
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     gate.ignoring.store(!accept, Ordering::Relaxed);
                     let _ = win.set_ignore_cursor_events(!accept);
@@ -333,7 +470,12 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
         // The wake strip itself, never "the whole window": if the window ever
         // fails to shrink to the strip, the rest of it must not swallow clicks
         // meant for whatever sits under the top of the screen.
-        Some((0.0, 0.0, STRIP_W, STRIP_H))
+        let side = app
+            .try_state::<crate::Shared>()
+            .and_then(|s| s.settings.lock().unwrap().island_pos)
+            .is_some_and(|p| matches!(p.dock, Dock::Left | Dock::Right));
+        let (w, h) = if side { (STRIP_H, SIDE_H) } else { (STRIP_W, STRIP_H) };
+        Some((0.0, 0.0, w, h))
     } else {
         let r = *gate.rect.lock().unwrap();
         if r.w <= 0.0 {

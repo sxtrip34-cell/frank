@@ -4,10 +4,14 @@
 // folder, state, last steps, the agent's last message). Each chat turn carries
 // those notes here; this turns them into a short briefing for Claude, adds each
 // project's git state, and returns the folders the chat may *read* — never
-// write: the chat's tools stay Read, Glob and Grep.
+// write: the only place the chat writes is its own memory.
 //
-// The briefing also lists the project folders the user works in, so that
-// "tell the X folder to …" can find X even when no session runs there.
+// Beyond the sessions Frank heard from, every folder Claude Code has worked in
+// lately is opened up for reading too, whichever app ran it (a terminal, VS
+// Code, Antigravity…): each transcript under ~/.claude/projects records its
+// folder. One written in the last few minutes is a session at work right now,
+// even if its hooks never reached Frank. The Desktop's folders are named too,
+// so that "tell the X folder to …" can find X, but not opened up.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,6 +32,18 @@ const GIT_MAX_FILES: usize = 10;
 /// Projects Claude Code worked in longer ago than this are left out.
 const PROJECT_MAX_AGE: Duration = Duration::from_secs(60 * 24 * 60 * 60);
 const MAX_FOLDERS: usize = 40;
+/// At most this many Claude Code project folders are opened up for reading,
+/// the most recently used first.
+const MAX_READABLE: usize = 30;
+/// A transcript written this recently is a session at work right now.
+const ACTIVE_WITHIN: Duration = Duration::from_secs(10 * 60);
+
+/// A folder Claude Code worked in, and when its transcript was last written.
+#[derive(Debug, Clone)]
+pub struct ClaudeProject {
+    pub dir: PathBuf,
+    pub last_active: SystemTime,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,9 +66,14 @@ pub struct Briefing {
     pub dirs: Vec<PathBuf>,
 }
 
-/// `folders` is `known_folders()`, passed in so tests stay off the real disk.
-pub async fn brief(notes: Vec<SessionNote>, folders: Vec<PathBuf>) -> Option<Briefing> {
-    if notes.is_empty() && folders.is_empty() {
+/// `projects` is `claude_projects()` and `folders` is `desktop_folders()`,
+/// passed in so tests stay off the real disk.
+pub async fn brief(
+    notes: Vec<SessionNote>,
+    projects: Vec<ClaudeProject>,
+    folders: Vec<PathBuf>,
+) -> Option<Briefing> {
+    if notes.is_empty() && projects.is_empty() && folders.is_empty() {
         return None;
     }
     let mut text = String::new();
@@ -95,48 +116,85 @@ Use this when the user asks about their projects; otherwise ignore it.]\n",
         }
     }
 
-    if !dirs.is_empty() {
-        text.push_str(
-            "\nYou may read files in these project folders with Read, Glob and Grep. \
-You cannot change anything in them or run commands.\n",
-        );
+    // Every folder Claude Code worked in lately is readable as well. One whose
+    // transcript was written in the last few minutes has a session at work in
+    // it right now, whether or not its hooks reached Frank.
+    let now = SystemTime::now();
+    let mut listed: Vec<String> = Vec::new();
+    for project in projects.into_iter().take(MAX_READABLE) {
+        if !(project.dir.is_absolute() && project.dir.is_dir()) {
+            continue;
+        }
+        let age = now.duration_since(project.last_active).unwrap_or_default();
+        let name = clip(&project.dir.to_string_lossy());
+        listed.push(if age < ACTIVE_WITHIN {
+            format!("{name} (a Claude Code session there was active {} min ago)", age.as_secs() / 60)
+        } else {
+            name
+        });
+        if !dirs.contains(&project.dir) {
+            dirs.push(project.dir);
+        }
     }
-    if !folders.is_empty() {
-        let list: Vec<String> = folders.iter().map(|f| clip(&f.to_string_lossy())).collect();
+    if !listed.is_empty() {
         text.push_str(&format!(
-            "\n[The user's project folders, most recently used first: {}]\n",
-            list.join(" | ")
+            "\n[Folders Claude Code has worked in on this computer, most recently used first: {}]\n",
+            listed.join(" | ")
         ));
     }
+
+    if !dirs.is_empty() {
+        text.push_str(
+            "\nYou may read the files in every folder above — the sessions' and Claude Code's project \
+folders — with Read, Glob and Grep. You cannot change anything in them or run commands.\n",
+        );
+    }
+    let others: Vec<String> = folders
+        .iter()
+        .filter(|f| !dirs.contains(f))
+        .map(|f| clip(&f.to_string_lossy()))
+        .collect();
+    if !others.is_empty() {
+        text.push_str(&format!(
+            "\n[Other folders on the user's Desktop, named only (you cannot read them): {}]\n",
+            others.join(" | ")
+        ));
+    }
+    // In a steady order, so the chat's process (and its quick answers) is kept
+    // from one turn to the next rather than restarted for a reshuffled list.
+    dirs.sort();
     Some(Briefing { text, dirs })
 }
 
-/// Folders the user is likely to name: the projects Claude Code worked in
-/// lately — each transcript records its folder — then the Desktop's own
-/// folders. Existing folders only, most recent first.
-pub fn known_folders() -> Vec<PathBuf> {
+/// Every folder Claude Code worked in lately on this computer, most recently
+/// used first: each transcript under ~/.claude/projects records its folder.
+/// Frank's own chat runs from its folders and is left out.
+pub fn claude_projects() -> Vec<ClaudeProject> {
     let now = SystemTime::now();
-    let ours = settings::local_dir();
-    let mut recent: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let ours = [settings::local_dir(), platform::frank_home()];
+    let mut found: Vec<ClaudeProject> = Vec::new();
     let projects = platform::home_dir().join(".claude").join("projects");
     if let Ok(entries) = std::fs::read_dir(&projects) {
         for entry in entries.flatten() {
             let Some((when, cwd)) = newest_transcript_folder(&entry.path()) else { continue };
             let fresh = now.duration_since(when).map(|age| age < PROJECT_MAX_AGE).unwrap_or(true);
-            // The chat's own sessions run under Frank's folder: not a project.
-            if fresh && cwd.is_absolute() && cwd.is_dir() && !cwd.starts_with(&ours) {
-                recent.push((when, cwd));
+            let own = ours.iter().any(|o| cwd.starts_with(o));
+            if fresh && !own && cwd.is_absolute() && cwd.is_dir() {
+                match found.iter_mut().find(|p| p.dir == cwd) {
+                    Some(p) => p.last_active = p.last_active.max(when),
+                    None => found.push(ClaudeProject { dir: cwd, last_active: when }),
+                }
             }
         }
     }
-    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    found
+}
 
+/// The Desktop's own folders, for "tell the X folder to …" when no session
+/// runs there. Named in the briefing, never opened up.
+pub fn desktop_folders() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for (_, dir) in recent {
-        if !out.contains(&dir) {
-            out.push(dir);
-        }
-    }
     let home = platform::home_dir();
     for desktop in [home.join("Desktop"), home.join("OneDrive").join("Desktop")] {
         let Ok(entries) = std::fs::read_dir(&desktop) else { continue };
@@ -270,16 +328,32 @@ mod tests {
 
     #[test]
     fn nothing_to_say_means_no_briefing() {
-        assert!(tauri::async_runtime::block_on(brief(vec![], vec![])).is_none());
+        assert!(tauri::async_runtime::block_on(brief(vec![], vec![], vec![])).is_none());
     }
 
     #[test]
-    fn known_folders_are_listed_but_not_opened_up() {
+    fn desktop_folders_are_named_but_not_opened_up() {
         let folder = std::env::temp_dir();
-        let b = tauri::async_runtime::block_on(brief(vec![], vec![folder.clone()])).unwrap();
+        let b = tauri::async_runtime::block_on(brief(vec![], vec![], vec![folder.clone()])).unwrap();
         assert!(b.text.contains(&*folder.to_string_lossy()));
         // Naming a folder is not the same as letting the chat read it.
         assert!(b.dirs.is_empty());
+    }
+
+    #[test]
+    fn claude_code_project_folders_open_up_for_reading() {
+        let here = std::env::temp_dir();
+        let gone = PathBuf::from(r"C:\definitely\not\here\frank");
+        let week_ago = SystemTime::now() - Duration::from_secs(7 * 24 * 60 * 60);
+        let projects = vec![
+            ClaudeProject { dir: here.clone(), last_active: SystemTime::now() },
+            ClaudeProject { dir: gone, last_active: week_ago },
+        ];
+        let b = tauri::async_runtime::block_on(brief(vec![], projects, vec![here.clone()])).unwrap();
+        assert_eq!(b.dirs, vec![here.clone()], "only folders that exist");
+        assert!(b.text.contains("active 0 min ago"), "a fresh transcript is a session at work");
+        // Readable already, so not named again as a Desktop folder.
+        assert!(!b.text.contains("named only"));
     }
 
     #[test]
@@ -305,6 +379,7 @@ mod tests {
                 note("relative/path"),
                 note("C:\\definitely\\not\\here\\frank"),
             ],
+            vec![],
             vec![],
         ))
         .unwrap();

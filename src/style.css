@@ -83,6 +83,118 @@ body {
     0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
+/* Docked to a side edge: the island grows out of that edge, so its shadow
+   falls inwards, onto the screen. */
+#island.docked-left {
+  box-shadow:
+    1px 0 0 rgba(255, 255, 255, 0.08),
+    10px 0 28px rgba(0, 0, 0, 0.45);
+}
+
+#island.docked-right {
+  box-shadow:
+    -1px 0 0 rgba(255, 255, 255, 0.08),
+    -10px 0 28px rgba(0, 0, 0, 0.45);
+}
+
+/* The upright tab carries a line of light down its inner side, in Frank's
+   colour for what he is doing (--dock-accent, set by the island). */
+#island.tab::before {
+  content: "";
+  position: absolute;
+  top: 20px;
+  bottom: 20px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--dock-accent, #5edbfa);
+  box-shadow: 0 0 8px var(--dock-accent, #5edbfa);
+  opacity: 0.85;
+  pointer-events: none;
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
+
+#island.docked-left.tab::before {
+  right: 0;
+}
+
+#island.docked-right.tab::before {
+  left: 0;
+}
+
+/* While the island is dragged, the side of it that would attach if it were
+   let go now lights up, the way Windows shows where a window will snap. */
+#island.dock-preview-top::after,
+#island.dock-preview-left::after,
+#island.dock-preview-right::after {
+  content: "";
+  position: absolute;
+  border-radius: 3px;
+  background: var(--dock-accent, #5edbfa);
+  box-shadow: 0 0 12px var(--dock-accent, #5edbfa);
+  pointer-events: none;
+}
+
+#island.dock-preview-top::after {
+  left: 12px;
+  right: 12px;
+  top: 0;
+  height: 3px;
+}
+
+#island.dock-preview-left::after {
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 3px;
+}
+
+#island.dock-preview-right::after {
+  top: 8px;
+  bottom: 8px;
+  right: 0;
+  width: 3px;
+}
+
+/* Hidden at a side edge, a slim handle of the same light stays where the tab
+   went in, so Frank can be found there again. */
+#wake-strip.side-left,
+#wake-strip.side-right {
+  top: 0;
+  transform: none;
+  width: 6px;
+  height: 112px;
+}
+
+#wake-strip.side-left {
+  left: 0;
+}
+
+#wake-strip.side-right {
+  left: auto;
+  right: 0;
+}
+
+#wake-strip.side-left::after,
+#wake-strip.side-right::after {
+  content: "";
+  position: absolute;
+  top: 30px;
+  bottom: 30px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--dock-accent, #5edbfa);
+  box-shadow: 0 0 6px var(--dock-accent, #5edbfa);
+  opacity: 0.6;
+}
+
+#wake-strip.side-left::after {
+  left: 1px;
+}
+
+#wake-strip.side-right::after {
+  right: 1px;
+}
+
 #island-clip {
   position: absolute;
   inset: 0;
@@ -633,6 +745,17 @@ body {
   user-select: text;
 }
 
+/* An action Frank wants to take is shown whole — the recipient, the subject,
+   every line of the email — so nothing is approved unseen. */
+.code.multi {
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-overflow: clip;
+  overflow-y: auto;
+  max-height: 120px;
+  line-height: 1.45;
+}
+
 .stack {
   position: relative;
   z-index: 1;
@@ -756,6 +879,14 @@ input[type="range"]::-webkit-slider-thumb {
 
 .chat-card {
   overflow: hidden;
+  transition: box-shadow 0.2s ease-out;
+}
+
+/* A file held over the open chat: let go, and it is attached. */
+.chat-card.drop-ready {
+  box-shadow:
+    inset 0 0 0 2px rgba(94, 219, 250, 0.85),
+    0 0 18px rgba(94, 219, 250, 0.35);
 }
 
 .chat-body {
@@ -796,6 +927,48 @@ input[type="range"]::-webkit-slider-thumb {
   height: 7px;
   border-radius: 50%;
   background: linear-gradient(135deg, #ff6b5b, #f7b32b, #2dd4a7, #38bdf8, #a78bfa);
+}
+
+.chip-remove {
+  width: 16px;
+  height: 16px;
+  margin: 0 -4px 0 2px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chip-remove:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+}
+
+/* The paperclip: same round button as the microphone, at the other end. */
+.attach-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition: transform 0.08s ease-out, background 0.2s;
+}
+
+.attach-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.attach-btn:active {
+  transform: scale(0.92);
 }
 
 .chat-log {

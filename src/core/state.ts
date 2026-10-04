@@ -4,6 +4,14 @@ import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./l
 import type { EyeShape } from "../character/engine";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
+/** The screen edge the island is attached to, or none. */
+export type Dock = "top" | "left" | "right" | "free";
+/** Where Rust hangs the island inside its window (window-logical px), and its edge. */
+export interface IslandAnchor {
+  x: number;
+  y: number;
+  dock: Dock;
+}
 export type PillBadge = "approval" | "finished" | "error";
 
 export interface AgentTask {
@@ -26,6 +34,8 @@ export interface ApprovalInfo {
   sessionId: string;
   tool: string;
   command: string;
+  /** "frank": an action the chat wants to take with a connected service. */
+  source?: "frank";
 }
 
 export interface ChatMessage {
@@ -124,7 +134,8 @@ export interface Settings {
   /** Interface language; "auto" follows the system's (see core/i18n.ts). */
   language: "auto" | "en" | "tr" | "ru";
   /** Where the user dragged the island (its top centre), or null for the top of the screen. */
-  islandPos: { x: number; y: number } | null;
+  /** Where the user dragged the island; null for its own place, top centre. */
+  islandPos: { x: number; y: number; dock?: Dock } | null;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -187,6 +198,11 @@ class AppState {
   lastActivity = performance.now();
 
   settings: Settings = { ...DEFAULT_SETTINGS };
+
+  /** Where the island hangs inside its window; Rust sends it with every placement. */
+  anchor: IslandAnchor = { x: 360, y: 0, dock: "top" };
+  /** While the island is dragged: the edge it would dock to if let go now. */
+  dragDock: Dock | null = null;
 
   private listeners = new Set<Listener>();
 

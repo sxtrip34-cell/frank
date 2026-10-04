@@ -212,6 +212,12 @@ fn file_block(path: &str) -> Option<Value> {
         }));
     }
 
+    // A Word document goes as the text inside it.
+    if ext == "docx" {
+        let text = crate::office::docx_text(std::path::Path::new(path)).ok()?;
+        return Some(json!({ "type": "text", "text": format!("Word document contents:\n{text}") }));
+    }
+
     let len = std::fs::metadata(path).ok()?.len();
     if len > MAX_INLINE_TEXT {
         return None;

@@ -29,6 +29,8 @@ export interface ViewActions {
   blip(): void;
   /** Voice chat on: the island stays open hands-free until it is turned off. */
   setVoiceActive(on: boolean): void;
+  /** Keeps the island open while something outside it (the Open dialog) has the user. */
+  keepOpen(on: boolean): void;
 }
 
 export interface ViewHost {
@@ -38,6 +40,8 @@ export interface ViewHost {
   focus?(): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
+  /** The chat only: a file dropped on it, for the next question. */
+  attach?(file: File): void;
 }
 
 // ── Shared pieces ─────────────────────────────────────────────────────────────
@@ -301,11 +305,24 @@ function buildApproval(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, t("approval.who")));
+      const req = State.pendingApproval;
+      // An action the chat asked for: Frank himself, and which service it touches.
+      if (req?.source === "frank") {
+        who.append(
+          h("div", { class: "who-row" },
+            dot("#5EDBFA", 8),
+            h("span", { class: "n", text: `Frank · ${req.tool}` }),
+            h("span", { text: t("approval.frank") }),
+          ),
+        );
+      } else {
+        who.append(agentWho(State.focusTask, t("approval.who")));
+      }
       // The whole point of approving here rather than in the terminal: this line
       // is the command, the file path or the URL being authorised, not just the
       // name of the tool asking.
       code.textContent = State.pendingApproval?.command || State.pendingApproval?.tool || "…";
+      code.classList.toggle("multi", req?.source === "frank");
       // Two buttons, built once. Rebuilding them between a mouse-down and a
       // mouse-up would swallow the click, and there is nothing left to vary:
       // "Always" is gone until the remembered-rules list exists to back it.

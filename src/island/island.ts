@@ -2,7 +2,7 @@
 // Mirrors IslandRootView.swift + IslandWindowController.swift.
 
 import { Tracked, Spring, clamp } from "../core/anim";
-import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
+import { Bridge, IS_TAURI } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
@@ -10,7 +10,7 @@ import {
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { State, type Dock, type IslandAnchor } from "../core/state";
 import { t } from "../core/i18n";
 import { BotEngine, hexToRGB } from "../character/engine";
 import { Greeting } from "../character/greeting";
@@ -83,7 +83,7 @@ export class Island {
    * A press on the island that is not on a control: a click when released in
    * place, a drag of the whole island once it moves (see wireInput).
    */
-  private press: { x: number; y: number; dragged: boolean } | null = null;
+  private press: { x: number; y: number; grabX: number; grabY: number; dragged: boolean } | null = null;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
   private botHovering = false;
@@ -94,6 +94,9 @@ export class Island {
   private confusedRecovery: number | null = null;
   private prevViewBeforeConfused: IslandViewName = "overview";
   private lastSyncedView: IslandViewName | null = null;
+
+  /** The file being dragged in arrived while the chat was open: it goes into the chat. */
+  private dropIntoChat = false;
 
   /** Drop sequence bookkeeping: last tick played, and whether the ✓ has fired. */
   private uploadTens = 0;
@@ -150,10 +153,17 @@ export class Island {
         void Bridge.log(`decide ${d} req=${req?.requestId ?? "none"}`);
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
-        void Bridge.approvalDecision(req.requestId, d);
         State.pendingApproval = null;
         State.isPinned = false;
         this.fsm.pinned = false;
+        // An action the chat asked for: the answer goes back to the tool
+        // waiting in Rust, and the user is back in the conversation.
+        if (req.source === "frank") {
+          void Bridge.toolDecision(req.requestId, d === "allow");
+          this.setView("prompt");
+          return;
+        }
+        void Bridge.approvalDecision(req.requestId, d);
         State.updateTask("integration_claude", "working");
         State.setPillBadge("integration_claude", null);
         this.setView(State.defaultView());
@@ -178,8 +188,9 @@ export class Island {
       },
       openSettingsWindow: () => void Bridge.openSettingsWindow(),
       blip: () => Sound.play("blip"),
-      setVoiceActive: (on) => {
-        // An approval card holds its own pin; ending voice must not take it away.
+      setVoiceActive: (on) => actions.keepOpen(on),
+      keepOpen: (on) => {
+        // An approval card holds its own pin; letting go must not take it away.
         if (!on && State.pendingApproval) return;
         State.isPinned = on;
         this.fsm.pinned = on;
@@ -251,8 +262,8 @@ export class Island {
 
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
-    // Away from the top edge there is no edge to peek back out of: stay in view.
-    this.fsm.canHide = () => State.settings.islandPos == null;
+    // Away from every edge there is no edge to peek back out of: stay in view.
+    this.fsm.canHide = () => this.dock !== "free";
     this.fsm.onTransition = (from, to) => {
       switch (to) {
         case "hidden":
@@ -379,10 +390,57 @@ export class Island {
 
   // ── File drop ───────────────────────────────────────────────────────────────
 
-  private onDragDrop(e: { type: string; paths?: string[] }) {
-    if (e.type !== "over") void Bridge.log(`drag ${e.type} ${e.paths?.length ?? 0} file(s)`);
+  /**
+   * Files dragged in from Explorer. This is plain HTML5 drag and drop, which
+   * WebView2 delivers itself: Tauri's own handler is switched off
+   * (dragDropEnabled: false in tauri.conf.json) because WebView2 lays windows
+   * of its own over the page whose drop targets stand in front of it.
+   */
+  private wireFileDrop() {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    // dragenter/dragleave fire for every element crossed; only the outermost
+    // pair means the file came in or went away.
+    let depth = 0;
+    window.addEventListener("dragenter", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (depth++ === 0) this.onFileDrag("enter");
+    });
+    window.addEventListener("dragover", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); // without this the drop is refused
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      this.onCursor(e.clientX, e.clientY);
+      this.onFileDrag("over");
+    });
+    window.addEventListener("dragleave", (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) this.onFileDrag("leave");
+    });
+    window.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      this.onFileDrag("drop", e.dataTransfer?.files?.[0] ?? null);
+    });
+  }
+
+  private onFileDrag(type: "enter" | "over" | "leave" | "drop", file: File | null = null) {
+    if (type !== "over") void Bridge.log(`drag ${type}${file ? ` ${file.name} (${file.size} bytes)` : ""}`);
     if (State.paused) return;
-    switch (e.type) {
+    // A file brought to the open chat goes straight into it, conversation and
+    // all; anywhere else Frank swallows it in the drop sequence, as before.
+    if (type === "enter" || (type === "over" && !State.fileDragOver)) {
+      this.dropIntoChat = State.mode === "expanded" && State.view === "prompt";
+    }
+    if (this.dropIntoChat) {
+      State.fileDragOver = type === "enter" || type === "over";
+      if (type === "drop" && file) this.views.get("prompt")?.attach?.(file);
+      State.notify();
+      return;
+    }
+    switch (type) {
       case "enter":
       case "over": {
         if (State.fileDragOver) return;
@@ -405,27 +463,27 @@ export class Island {
       }
       case "drop": {
         State.fileDragOver = false;
-        const path = e.paths?.[0];
-        if (!path) {
+        if (!file) {
           this.engine.animateMorph(0);
           this.setView(State.defaultView());
           return;
         }
-        this.swallow(path);
+        this.swallow(file);
         break;
       }
     }
   }
 
   /**
-   * Frank eats the file. Nothing here waits on the file system: the copy into
-   * the inbox runs in the background and swaps the path in when it lands, so a
-   * slow disk can never stall the animation — same as FileDropHandler on macOS.
+   * Frank eats the file. Nothing here waits on the file system: the bytes go
+   * into the inbox in the background and the path is filled in when they land,
+   * so a big file can never stall the animation — same as FileDropHandler on
+   * macOS. Until then the file has a name but no path, and is not sent.
    */
-  private swallow(path: string) {
-    const name = path.split(/[\\/]/).pop() || t("file.fallback");
-    State.droppedFile = { name, path };
-    State.promptContext = { kind: "file", name, path };
+  private swallow(dropped: File) {
+    const name = dropped.name || t("file.fallback");
+    State.droppedFile = { name, path: "" };
+    State.promptContext = null;
     State.chatHistory = [];
     void Bridge.chatReset();
 
@@ -442,7 +500,7 @@ export class Island {
     this.setView("uploading");
     this.ensureRunning();
 
-    void Bridge.ingestFile(path)
+    void Bridge.ingestDropped(dropped)
       .then((file) => {
         State.droppedFile = { name: file.name, path: file.path };
         State.promptContext = { kind: "file", name: file.name, path: file.path };
@@ -487,8 +545,22 @@ export class Island {
 
   // ── Geometry ────────────────────────────────────────────────────────────────
 
+  /** The edge the island is attached to, as Rust last placed it. */
+  private get dock(): Dock {
+    return State.anchor.dock;
+  }
+
+  /** Docked to the left or right edge: an upright tab that hides into it. */
+  private get side(): boolean {
+    return this.dock === "left" || this.dock === "right";
+  }
+
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
+    let { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, this.side);
+    // An action Frank asks to take is shown in full: the card grows for it.
+    if (State.mode === "expanded" && State.view === "approval" && State.pendingApproval?.source === "frank") {
+      h = 260;
+    }
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     return { w, h, r };
   }
@@ -511,34 +583,93 @@ export class Island {
     const w = this.width.value;
     const hh = this.height.value;
     const r = this.radius.value;
-    // Docked, the island hangs from the top edge with square top corners;
-    // dragged away from it, it is rounded all round.
-    const floating = State.settings.islandPos != null;
+    // Docked, the island hangs from its edge with square corners on that side
+    // and slides out of it: from the top, or at a side as an upright tab that
+    // opens into a drawer. Free, it is rounded all round.
+    const dock = this.dock;
+    const side = this.side;
+    const rect = this.islandRect();
+    this.islandEl.style.left = `${rect.x}px`;
+    this.islandEl.style.top = `${rect.y}px`;
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
-    this.islandEl.style.borderRadius = floating ? `${r}px` : `0 0 ${r}px ${r}px`;
-    this.islandEl.classList.toggle("floating", floating);
-    this.islandEl.style.transform = `translateX(-50%)`;
+    this.islandEl.style.borderRadius =
+      dock === "top" ? `0 0 ${r}px ${r}px`
+      : dock === "left" ? `0 ${r}px ${r}px 0`
+      : dock === "right" ? `${r}px 0 0 ${r}px`
+      : `${r}px`;
+    this.islandEl.classList.toggle("floating", dock === "free");
+    this.islandEl.classList.toggle("docked-left", dock === "left");
+    this.islandEl.classList.toggle("docked-right", dock === "right");
+    // The tab's own line of light; once it has slid into the edge, the handle
+    // on the wake strip takes over.
+    this.islandEl.classList.toggle("tab", side && State.mode === "compact");
+    // While dragged: light the side that would attach if it were let go now.
+    for (const edge of ["top", "left", "right"] as const) {
+      this.islandEl.classList.toggle(`dock-preview-${edge}`, State.dragDock === edge);
+    }
+    this.wakeStrip.classList.toggle("side-left", dock === "left");
+    this.wakeStrip.classList.toggle("side-right", dock === "right");
+    // At a side the handle sits level with the island; once the window has
+    // shrunk to the strip, the strip is the whole window.
+    this.wakeStrip.style.top = side && !this.collapsed ? `${rect.y}px` : "";
     // These follow the island as it resizes, so they belong here rather than in
-    // the state-driven DOM sync.
-    this.miniGrid.style.left = `${w - 40 - 14.5}px`;
-    this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
+    // the state-driven DOM sync. In the tab the other sessions sit under Frank.
+    this.miniGrid.style.left = side ? `${w / 2 - 14.5}px` : `${w - 40 - 14.5}px`;
+    this.miniGrid.style.top = side ? `${hh - 43}px` : `${hh / 2 - 14.5}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
-    if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
+    if (
+      Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.y - rect.y) > 0.5 ||
+      Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5
+    ) {
       this.pushedRect = rect;
       void Bridge.setIslandRect(rect.x, rect.y, rect.w, rect.h);
     }
   }
 
-  /** Island rect in window coordinates (origin top-left of the 720×320 window). */
+  /**
+   * Island rect in window coordinates (origin top-left of the 720×320 window),
+   * hung from the anchor Rust placed: against the window's side for a side
+   * dock, otherwise centred on the anchor. Either way it stays inside the
+   * window, which Rust keeps on the screen, so an island near an edge grows
+   * away from it. (Same rule as island_in_window in src-tauri/src/placement.rs.)
+   */
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const a = State.anchor;
+    const x =
+      a.dock === "left" ? 0
+      : a.dock === "right" ? PANEL_W - w
+      : clamp(a.x - w / 2, 0, PANEL_W - w);
+    const y = a.dock === "top" ? 0 : clamp(a.y, 0, Math.max(0, PANEL_H - hh));
+    return { x, y, w, h: hh };
+  }
+
+  /** Rust placed the window again: hang the island from the new anchor. */
+  onAnchor(anchor: IslandAnchor) {
+    const dockChanged = anchor.dock !== State.anchor.dock;
+    State.anchor = anchor;
+    // A side dock changes the island's shape; elsewhere only its place moves.
+    if (dockChanged) this.animateGeometry(false);
+    this.dirty = true;
+    this.ensureRunning();
+  }
+
+  /** While dragged, the edge it would dock to (null: none). */
+  onDragDock(dock: Dock | null) {
+    State.dragDock = dock;
+    this.ensureRunning();
+  }
+
+  /** The drag is over, however it ended: no click follows it. */
+  onDragEnd() {
+    this.press = null;
+    State.dragDock = null;
+    this.ensureRunning();
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────
@@ -589,7 +720,10 @@ export class Island {
         State.mode !== "expanded" ||
         e.clientY - this.islandRect().y < DRAG_HEADER_H ||
         this.isBotHit(e.clientX, e.clientY);
-      this.press = onControl || !grabbable ? null : { x: e.screenX, y: e.screenY, dragged: false };
+      const rect = this.islandRect();
+      this.press = onControl || !grabbable
+        ? null
+        : { x: e.screenX, y: e.screenY, grabX: e.clientX - rect.x, grabY: e.clientY - rect.y, dragged: false };
     });
 
     window.addEventListener("mousemove", (e) => {
@@ -602,7 +736,8 @@ export class Island {
       if (Math.hypot(e.screenX - press.x, e.screenY - press.y) < DRAG_THRESHOLD) return;
       press.dragged = true;
       this.cancelBotHover();
-      void Bridge.startIslandDrag();
+      // Rust moves the window from here on and says when it is let go.
+      void Bridge.islandDragBegin(press.grabX, press.grabY);
     });
 
     window.addEventListener("mouseup", (e) => {
@@ -624,7 +759,7 @@ export class Island {
       State.lastActivity = performance.now();
     });
 
-    void onDragDrop((e) => this.onDragDrop(e));
+    this.wireFileDrop();
 
     // Outside Tauri (plain browser) drive the cursor from DOM events so the
     // island can be inspected with `npm run dev`.
@@ -754,7 +889,8 @@ export class Island {
   }
 
   private frame = (nowMs: number) => {
-    const dt = Math.min(0.05, (nowMs - this.lastFrame) / 1000);
+    // Never negative: a spring stepped backwards in time runs away.
+    const dt = clamp((nowMs - this.lastFrame) / 1000, 0, 0.05);
     this.lastFrame = nowMs;
 
     this.width.step(dt, nowMs);
@@ -819,7 +955,7 @@ export class Island {
   };
 
   private updateBotTargets() {
-    const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
+    const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress, this.side);
     this.botCx.target = p.cx;
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
@@ -955,13 +1091,21 @@ export class Island {
 
     syncMiniBotStates(State.tasks);
     this.engine.setState(State.effectiveState);
+
+    // The light along the docked tab and its handle at the edge take Frank's
+    // colour for what he is doing; resting, his own.
+    const s = State.effectiveState;
+    const accent = s === "idle" || s === "sleeping" || s === "dizzy" ? "#5EDBFA" : botGlowColor(s);
+    document.documentElement.style.setProperty("--dock-accent", accent);
   }
 
-  /** Applies settings coming from Rust at boot. */
+  /** Applies settings, at boot and whenever they change (a drop at an edge included). */
   applySettings() {
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    // Docking to or from the right edge changes the island's shape.
+    this.animateGeometry(false);
     State.notify();
   }
 

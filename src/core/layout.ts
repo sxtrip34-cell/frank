@@ -66,6 +66,14 @@ export const EXPANDED_CORNER = 22;
 export const WAKE_STRIP_W = 240;
 export const WAKE_STRIP_H = 6;
 
+/**
+ * Docked to the right edge, the compact island is an upright tab: Frank on top,
+ * the other sessions under him. SIDE_H is also the height of the wake strip
+ * there (SIDE_H in src-tauri/src/island.rs).
+ */
+export const SIDE_W = 44;
+export const SIDE_H = 112;
+
 export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   overview: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "pills" },
   empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
@@ -97,18 +105,20 @@ export function chatPromptHeight(messageCount: number): number {
   return Math.min(300, 240 + messageCount * 40);
 }
 
+/** `side`: docked to the right edge, where it hides by sliding into that edge. */
 export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
   chatCount = 0,
+  side = false,
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
       // No notch to hide inside on a PC: the island retracts to zero height and
       // slides into the top edge of the screen instead of sitting there as a bar.
-      return { w: NOTCH_W, h: 0 };
+      return side ? { w: 0, h: SIDE_H } : { w: NOTCH_W, h: 0 };
     case "compact":
-      return { w: COMPACT_W, h: NOTCH_H };
+      return side ? { w: SIDE_W, h: SIDE_H } : { w: COMPACT_W, h: NOTCH_H };
     case "expanded": {
       const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
       return { w: EXPANDED_W, h };
@@ -129,12 +139,17 @@ export function botPosition(
   view: IslandViewName,
   islandH: number,
   uploadProgress = 0,
+  side = false,
 ): BotPlacement {
   switch (mode) {
     case "hidden":
-      return { cx: 46, cy: 16, diameter: 6, opacity: 0 };
+      return side
+        ? { cx: SIDE_W / 2, cy: 28, diameter: 6, opacity: 0 }
+        : { cx: 46, cy: 16, diameter: 6, opacity: 0 };
     case "compact":
-      return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
+      return side
+        ? { cx: SIDE_W / 2, cy: 28, diameter: 24, opacity: 1 }
+        : { cx: 40, cy: 16, diameter: 20, opacity: 1 };
     case "expanded": {
       const layout = VIEW_LAYOUTS[view];
       if (view === "uploading") {

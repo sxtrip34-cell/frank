@@ -93,9 +93,11 @@ function typingDots(): HTMLElement {
   );
 }
 
-/** The coloured chip showing what the question is about (a dropped file). */
-function contextChip(label: string): HTMLElement {
-  const chip = h("div", { class: "chip" }, h("i", { class: "chip-dot" }), h("span", { text: label }));
+/** The coloured chip showing what the question is about (an attached file), with × to take it off. */
+function contextChip(label: string, onRemove: () => void): HTMLElement {
+  const remove = h("button", { class: "chip-remove", title: t("chat.attach.remove") }, svg(ICONS.xmark, 9));
+  remove.addEventListener("click", onRemove);
+  const chip = h("div", { class: "chip" }, h("i", { class: "chip-dot" }), h("span", { text: label }), remove);
   requestAnimationFrame(() => chip.classList.add("settled"));
   return chip;
 }
@@ -109,16 +111,14 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     placeholder: t("chat.placeholder.first"),
     spellcheck: "false",
   }) as HTMLInputElement;
+  const attach = h("button", { class: "attach-btn", title: t("chat.attach") }, svg(ICONS.paperclip, 13, { stroke: 2 }));
   const mic = h("button", { class: "mic-btn", title: t("chat.voice") }, svg(ICONS.mic, 13));
   const send = h("button", { class: "send-btn", title: t("chat.send") }, svg(ICONS.arrowUp, 11));
-  const bar = h("div", { class: "chat-bar" }, input, mic, send);
+  const bar = h("div", { class: "chat-bar" }, attach, input, mic, send);
 
-  const el = h(
-    "div",
-    { class: "view" },
-    h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, chipRow, log, bar)),
-  );
-  (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
+  const card = h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, chipRow, log, bar));
+  const el = h("div", { class: "view" }, card);
+  card.style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
   let sending = false;
   let renderedCount = -1;
@@ -144,8 +144,9 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     // A dropped or pasted file rides along with the first message after it
     // arrived — mid-conversation too, for a screenshot pasted later on.
     const file = State.droppedFile;
+    // No path yet: the dropped bytes are still on their way into the inbox.
     const context: ChatContext | null =
-      file && file.path !== sentFilePath ? { kind: "file", name: file.name, path: file.path } : null;
+      file && file.path && file.path !== sentFilePath ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
       const reply = await Bridge.chatSend(query, context, voice, sessionNotes());
@@ -379,15 +380,54 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     }
   }
 
+  /**
+   * A file for the next question, from the Open dialog, the clipboard or a drop
+   * on the chat: it rides along with the next message, like a pasted screenshot.
+   * `pending` resolves to null when there turned out to be nothing to attach.
+   */
+  async function attachFile(pending: Promise<{ name: string; path: string } | null>): Promise<boolean> {
+    try {
+      const file = await pending;
+      if (!file) return false;
+      State.droppedFile = { name: file.name, path: file.path };
+      Sound.play("attach");
+      return true;
+    } catch (err) {
+      State.noteMessage = String(err).replace(/^Error:\s*/, "");
+      State.view = "note";
+      Sound.play("error");
+      return true;
+    } finally {
+      State.notify();
+      onHeightChange();
+      input.focus();
+    }
+  }
+
+  // The Open dialog takes the user away from the island: it must still be open
+  // when they come back with a file.
+  attach.addEventListener("click", async () => {
+    actions.keepOpen(true);
+    try {
+      await attachFile(Bridge.pickFile(t("chat.attach.dialog")));
+    } finally {
+      actions.keepOpen(false);
+    }
+  });
+
   send.addEventListener("click", () => void submit());
   input.addEventListener("paste", (e) => {
-    const item = Array.from(e.clipboardData?.items ?? []).find(
-      (i) => i.kind === "file" && i.type.startsWith("image/"),
-    );
-    if (!item) return; // text pastes as usual
+    const files = Array.from(e.clipboardData?.items ?? []).filter((i) => i.kind === "file");
+    if (files.length === 0) return; // text pastes as usual
     e.preventDefault();
-    const blob = item.getAsFile();
-    if (blob) void attachImage(blob);
+    // Taken now: the clipboard data is gone once the event is over.
+    const image = files.find((i) => i.type.startsWith("image/"))?.getAsFile() ?? null;
+    void (async () => {
+      // A file copied in Explorer goes as itself, read by its path; with no
+      // such file on the clipboard it is a screenshot (Win+Shift+S): pixels.
+      if (await attachFile(Bridge.pasteFile())) return;
+      if (image) await attachImage(image);
+    })();
   });
   input.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Enter") {
@@ -399,14 +439,27 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
 
   return {
     el,
+    attach(file) {
+      void attachFile(Bridge.ingestDropped(file));
+    },
     sync() {
       const file = State.droppedFile;
       const wantChip = file?.name ?? "";
       if (chipRow.dataset.label !== wantChip) {
         chipRow.dataset.label = wantChip;
         clear(chipRow);
-        if (wantChip) chipRow.append(contextChip(wantChip));
+        if (wantChip) {
+          chipRow.append(
+            contextChip(wantChip, () => {
+              State.droppedFile = null;
+              State.notify();
+              onHeightChange();
+            }),
+          );
+        }
       }
+      // A file held over the open chat goes into it when let go.
+      card.classList.toggle("drop-ready", State.fileDragOver);
 
       const thinking = State.stateOverride === "thinking";
       const count = State.chatHistory.length + (thinking ? 0.5 : 0);
