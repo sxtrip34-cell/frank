@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Frank — character sheet</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 28px;
+        background: #0b0c0e;
+        color: #c9cdd4;
+        font: 13px system-ui, "Segoe UI", sans-serif;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+        color: #f5f6f8;
+      }
+      p {
+        margin: 0 0 22px;
+        color: #8e939c;
+      }
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(6, 150px);
+        gap: 14px;
+      }
+      figure {
+        margin: 0;
+        background: #141518;
+        border-radius: 16px;
+        padding: 6px 0 10px;
+        text-align: center;
+      }
+      canvas {
+        display: block;
+        margin: 0 auto;
+      }
+      figcaption {
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Frank</h1>
+    <p>A small ball of light with one big eye. Every state and emote, drawn by the app's own engine.</p>
+    <div id="grid"></div>
+    <script type="module" src="./character-sheet.ts"></script>
+  </body>
+</html>
