@@ -20,8 +20,9 @@ const WAKE_MAX_MS = 20_000;
  * A "Frank" whose transcript took longer than this is not acted on: the user
  * has long since moved on, and opening minutes later only startles them. It
  * happens while the speech model is still loading, right after Windows starts.
+ * Generous, so a slow computer still gets its every-day "Frank" through.
  */
-const WAKE_STALE_MS = 10_000;
+const WAKE_STALE_MS = 30_000;
 
 /**
  * The wake word opens the sentence ("Frank, …"), or follows a greeting ("Hey
@@ -103,12 +104,11 @@ export class WakeListener {
     } finally {
       this.busy = false;
     }
-    const took = performance.now() - asked;
-    if (took > WAKE_STALE_MS) {
-      const what = command !== null ? "too late, dropped" : "no wake word";
-      void Bridge.log(`wake: transcript took ${Math.round(took)} ms, ${what}`);
-      command = null;
-    }
+    const took = Math.round(performance.now() - asked);
+    const stale = took > WAKE_STALE_MS;
+    const what = command === null ? "no wake word" : stale ? "wake word, too late: dropped" : "wake word";
+    void Bridge.log(`wake: transcribed in ${took} ms, ${what}`);
+    if (stale) command = null;
     if (from !== this.capture) return;
     // Heard: stay paused; whoever runs the conversation resumes us after it.
     if (command !== null) this.onWake(command);

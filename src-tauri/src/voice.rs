@@ -323,6 +323,7 @@ fn spawn_whisper_server(model: PathBuf) -> Option<WhisperServer> {
         }
     };
     platform::tie_to_app(&child);
+    platform::full_speed(&child);
     log::line("voice: whisper-server starting");
     Some(WhisperServer { child, port, model, started: Instant::now(), ready: false })
 }
@@ -537,6 +538,7 @@ fn start_piper(voice: &Path) -> Result<PiperProcess, String> {
         .spawn()
         .map_err(|e| format!("Could not start piper: {e}"))?;
     platform::tie_to_app(&child);
+    platform::full_speed(&child);
     let stdin = child.stdin.take().ok_or("piper has no stdin")?;
     let stdout = child.stdout.take().ok_or("piper has no stdout")?;
     Ok(PiperProcess { child, stdin, lines: BufReader::new(stdout).lines(), out_dir })
@@ -614,6 +616,7 @@ async fn run(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start {name}: {e}"))?;
+    platform::full_speed(&child);
     if let (Some(data), Some(mut pipe)) = (stdin, child.stdin.take()) {
         pipe.write_all(data).await.map_err(|e| format!("{name}: {e}"))?;
     }

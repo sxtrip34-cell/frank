@@ -155,6 +155,9 @@ pub fn no_console(cmd: &mut Command) -> &mut Command {
 /// rely on kill_on_drop and the app's own shutdown.
 pub fn tie_to_app(_child: &tokio::process::Child) {}
 
+/// Windows slows down background helpers unless told not to; Linux does not.
+pub fn full_speed(_child: &tokio::process::Child) {}
+
 pub fn open_url(url: &str) {
     let _ = Command::new("xdg-open").arg(url).spawn();
 }

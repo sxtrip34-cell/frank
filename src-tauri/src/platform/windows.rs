@@ -16,7 +16,11 @@ use ::windows::Win32::System::JobObjects::{
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use ::windows::Win32::System::SystemInformation::GetLocalTime;
-use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use ::windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcessToken, ProcessPowerThrottling, SetProcessInformation,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE,
+};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SM_SWAPBUTTON,
@@ -66,7 +70,10 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Nothing to set up before the webview starts.
-pub fn prepare_environment() {}
+pub fn prepare_environment() {
+    // Frank sits in the background nearly all the time; see full_speed().
+    no_power_throttling(unsafe { GetCurrentProcess() });
+}
 
 pub fn local_time() -> LocalTime {
     let t = unsafe { GetLocalTime() };
@@ -97,6 +104,35 @@ pub fn ui_language() -> Lang {
 /// Spawned helpers must never flash a console window.
 pub fn no_console(cmd: &mut Command) -> &mut Command {
     cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+/// Windows 11 runs a process whose window is not in front — and a helper
+/// started without a console has none — on its slowest cores at a low clock
+/// ("efficiency mode"). Whisper is then far slower to hear "Frank"
+/// while the user is busy in another app than with Frank in front: this
+/// opts a helper out, so it runs at full speed whatever window has focus.
+pub fn full_speed(child: &tokio::process::Child) {
+    if let Some(process) = child.raw_handle() {
+        no_power_throttling(HANDLE(process as *mut _));
+    }
+}
+
+fn no_power_throttling(process: HANDLE) {
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        // Take charge of the speed policy, and switch it off.
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // Fails on Windows 10 before 1709, which does not throttle like this anyway.
+    let _ = unsafe {
+        SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &state as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
 }
 
 /// Ties a long-running helper (the chat's Claude Code, whisper-server, Piper)
