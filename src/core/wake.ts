@@ -16,6 +16,12 @@ const WAKE_MIN_PEAK = 0.035;
 const WAKE_OVER_FLOOR = 5;
 /** "Frank, …" is a sentence or two; a long monologue is somebody else talking. */
 const WAKE_MAX_MS = 20_000;
+/**
+ * A "Frank" whose transcript took longer than this is not acted on: the user
+ * has long since moved on, and opening minutes later only startles them. It
+ * happens while the speech model is still loading, right after Windows starts.
+ */
+const WAKE_STALE_MS = 10_000;
 
 /**
  * The wake word opens the sentence ("Frank, …"), or follows a greeting ("Hey
@@ -89,12 +95,19 @@ export class WakeListener {
     this.busy = true;
     from.pause();
     let command: string | null = null;
+    const asked = performance.now();
     try {
       command = afterWakeWord(await Bridge.voiceTranscribe(wav), State.settings.wakeWord);
     } catch (err) {
       void Bridge.log(`wake: transcribe failed: ${String(err)}`);
     } finally {
       this.busy = false;
+    }
+    const took = performance.now() - asked;
+    if (took > WAKE_STALE_MS) {
+      const what = command !== null ? "too late, dropped" : "no wake word";
+      void Bridge.log(`wake: transcript took ${Math.round(took)} ms, ${what}`);
+      command = null;
     }
     if (from !== this.capture) return;
     // Heard: stay paused; whoever runs the conversation resumes us after it.

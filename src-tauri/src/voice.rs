@@ -48,9 +48,14 @@ const HALLUCINATIONS: &[&str] = &[
     "thanks for watching!",
 ];
 
-/// Loading a model onto the GPU takes a few seconds; a server that is not up
-/// by then is given up on, and the command line used instead.
-const SERVER_START_TIMEOUT: Duration = Duration::from_secs(40);
+/// Loading a model onto the GPU takes a few seconds — but right after Windows
+/// starts (Frank starts with it), with the disk busy and the GPU driver still
+/// waking up, it can take minutes. A server that is not up by then is given
+/// up on, and the command line used instead.
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(180);
+/// After a server failed to start, the command line is used this long before
+/// another server is tried, so a broken one is not restarted per utterance.
+const SERVER_RETRY_AFTER: Duration = Duration::from_secs(120);
 
 /// Common English words: an answer with no Turkish or Cyrillic letters that is
 /// made of these is read with the English voice.
@@ -62,15 +67,27 @@ const ENGLISH_WORDS: &[&str] = &[
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// whisper-server with its model loaded, once started.
+/// whisper-server, loading its model or ready.
 struct WhisperServer {
     child: tokio::process::Child,
     port: u16,
     model: PathBuf,
+    started: Instant,
+    /// It has answered HTTP: the model is loaded.
+    ready: bool,
 }
 
-static WHISPER: LazyLock<tokio::sync::Mutex<Option<WhisperServer>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(None));
+#[derive(Default)]
+struct WhisperSlot {
+    server: Option<WhisperServer>,
+    /// No new server before this: the last one failed to start.
+    retry_at: Option<Instant>,
+}
+
+/// Held only for quick looks, never while the model loads: a second utterance
+/// must not queue behind a server start.
+static WHISPER: LazyLock<tokio::sync::Mutex<WhisperSlot>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(WhisperSlot::default()));
 
 /// One Piper per voice, reading a line of text at a time and printing the path
 /// of the WAV it wrote for it.
@@ -165,7 +182,7 @@ pub async fn transcribe(wav: Vec<u8>) -> Result<String, String> {
             Err(why) => {
                 // Forget the server: the next utterance starts a fresh one.
                 log::line(format!("voice: whisper-server failed ({why}), using whisper-cli"));
-                *WHISPER.lock().await = None;
+                WHISPER.lock().await.server = None;
             }
         }
     }
@@ -208,18 +225,75 @@ pub async fn warm_up() {
     }
 }
 
-/// The port of a running whisper-server, starting one if needed. None when it
-/// is not installed or will not start: the caller falls back to whisper-cli.
+/// The port of a running whisper-server, starting one if needed and waiting
+/// for it to load its model. None when it is not installed or will not start:
+/// the caller falls back to whisper-cli.
+///
+/// A server still loading is waited for, never killed and started over: on a
+/// cold start the load can outlast any one utterance, and starting from
+/// scratch each time meant it never finished.
 async fn whisper_server_port() -> Option<u16> {
-    let mut slot = WHISPER.lock().await;
-    let model = whisper_model()?;
-    if let Some(server) = slot.as_mut() {
-        if server.model == model && matches!(server.child.try_wait(), Ok(None)) {
-            return Some(server.port);
-        }
-    }
-    *slot = None;
+    let client = reqwest::Client::new();
+    loop {
+        let port = {
+            let mut slot = WHISPER.lock().await;
+            let model = whisper_model()?;
+            let usable = match slot.server.as_mut() {
+                Some(s) => s.model == model && matches!(s.child.try_wait(), Ok(None)),
+                None => false,
+            };
+            match slot.server.as_ref().filter(|_| usable) {
+                Some(server) if server.ready => return Some(server.port),
+                Some(server) if server.started.elapsed() <= SERVER_START_TIMEOUT => server.port,
+                Some(_) => {
+                    log::line("voice: whisper-server did not come up in time");
+                    slot.server = None;
+                    slot.retry_at = Some(Instant::now() + SERVER_RETRY_AFTER);
+                    return None;
+                }
+                None => {
+                    if let Some(old) = slot.server.take() {
+                        // It exited — unless the model changed under it.
+                        if old.model == model {
+                            log::line("voice: whisper-server stopped");
+                            slot.retry_at = Some(Instant::now() + SERVER_RETRY_AFTER);
+                        }
+                    }
+                    if slot.retry_at.is_some_and(|at| Instant::now() < at) {
+                        return None;
+                    }
+                    let server = spawn_whisper_server(model)?;
+                    let port = server.port;
+                    slot.server = Some(server);
+                    port
+                }
+            }
+        };
 
+        // It answers HTTP once the model is loaded. Asked without the lock, so
+        // a caller arriving meanwhile waits on the same server, not behind us.
+        let url = format!("http://127.0.0.1:{port}/");
+        if client.get(&url).timeout(Duration::from_secs(1)).send().await.is_ok() {
+            let mut guard = WHISPER.lock().await;
+            let slot = &mut *guard;
+            if let Some(server) = slot.server.as_mut().filter(|s| s.port == port) {
+                if !server.ready {
+                    server.ready = true;
+                    slot.retry_at = None;
+                    log::line(format!(
+                        "voice: whisper-server ready in {} ms",
+                        server.started.elapsed().as_millis()
+                    ));
+                }
+                return Some(port);
+            }
+            continue; // replaced meanwhile: look again
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn spawn_whisper_server(model: PathBuf) -> Option<WhisperServer> {
     let exe = voice_dir()
         .join("whisper")
         .join(format!("whisper-server{}", std::env::consts::EXE_SUFFIX));
@@ -241,26 +315,16 @@ async fn whisper_server_port() -> Option<u16> {
         cmd.current_dir(dir);
     }
     platform::no_console(&mut cmd);
-    let mut child = tokio::process::Command::from(cmd).kill_on_drop(true).spawn().ok()?;
-    platform::tie_to_app(&child);
-
-    // It answers HTTP once the model is loaded.
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/");
-    let started = Instant::now();
-    loop {
-        if client.get(&url).timeout(Duration::from_secs(1)).send().await.is_ok() {
-            break;
-        }
-        if started.elapsed() > SERVER_START_TIMEOUT || !matches!(child.try_wait(), Ok(None)) {
-            log::line("voice: whisper-server did not come up");
+    let child = match tokio::process::Command::from(cmd).kill_on_drop(true).spawn() {
+        Ok(child) => child,
+        Err(why) => {
+            log::line(format!("voice: whisper-server did not start: {why}"));
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    log::line(format!("voice: whisper-server ready in {} ms", started.elapsed().as_millis()));
-    *slot = Some(WhisperServer { child, port, model });
-    Some(port)
+    };
+    platform::tie_to_app(&child);
+    log::line("voice: whisper-server starting");
+    Some(WhisperServer { child, port, model, started: Instant::now(), ready: false })
 }
 
 /// Detects the language, and transcribes again as Turkish when Whisper's
